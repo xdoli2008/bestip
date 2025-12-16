@@ -11,6 +11,7 @@ import time
 import sys
 import statistics
 import socket
+import threading
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,6 +29,8 @@ class AdvancedIPTester:
         self.ping_count = self.config.get('ping_count', 10)  # 增加ping次数以获得更准确的抖动计算
         self.ping_timeout = self.config.get('ping_timeout', 2)  # ping超时时间（秒）
         self.tcp_timeout = self.config.get('tcp_timeout', 5)  # TCP连接超时时间（秒）
+        self.max_workers = self.config.get('max_workers', 10)  # 并发线程数，默认10
+        self.print_lock = threading.Lock()  # 打印锁，用于同步输出
         self.results = []
         
     def parse_ping_output_detailed(self, output: str) -> Dict:
@@ -170,33 +173,38 @@ class AdvancedIPTester:
             return scores
         
         # 获取指标值，处理None值
-        delay = ping_result.get('avg_delay', 1000) or 1000
-        loss = ping_result.get('loss_rate', 100) or 100
-        jitter = ping_result.get('jitter', 100) or 100
-        tcp_time = tcp_result.get('connect_time', 1000) or 1000
+        delay = ping_result.get('avg_delay', 1000)
+        loss = ping_result.get('loss_rate', 100)
+        jitter = ping_result.get('jitter', 100)
+        tcp_time = tcp_result.get('connect_time', 1000)
         
         # 1. 流媒体评分（下载带宽 + 空载延迟 + 丢包率 + 负载延迟差值）
         # 简化版：只考虑延迟、丢包、抖动
         streaming_score = 100
         
-        # 延迟扣分（<50ms不扣分，50-100ms扣10分，100-200ms扣30分，>200ms扣50分）
-        if delay > 200:
+        # 延迟扣分（针对国际连接调整阈值）
+        # <100ms不扣分，100-200ms扣10分，200-300ms扣30分，>300ms扣50分
+        if delay > 300:
             streaming_score -= 50
-        elif delay > 100:
+        elif delay > 200:
             streaming_score -= 30
-        elif delay > 50:
+        elif delay > 100:
             streaming_score -= 10
         
-        # 丢包扣分（<1%不扣分，1-5%扣20分，>5%扣50分）
+        # 丢包扣分（流媒体对丢包有一定容忍度）
+        # <1%不扣分，1-3%扣10分，3-5%扣20分，>5%扣40分
         if loss > 5:
-            streaming_score -= 50
-        elif loss > 1:
+            streaming_score -= 40
+        elif loss > 3:
             streaming_score -= 20
+        elif loss > 1:
+            streaming_score -= 10
         
-        # 抖动扣分（<20ms不扣分，20-50ms扣10分，>50ms扣30分）
-        if jitter > 50:
-            streaming_score -= 30
-        elif jitter > 20:
+        # 抖动扣分（流媒体对抖动不敏感）
+        # <50ms不扣分，50-100ms扣10分，>100ms扣20分
+        if jitter > 100:
+            streaming_score -= 20
+        elif jitter > 50:
             streaming_score -= 10
         
         streaming_score = max(0, streaming_score)
@@ -204,22 +212,26 @@ class AdvancedIPTester:
         # 2. 游戏评分（丢包率 + 空载延迟 + 负载延迟差值）
         gaming_score = 100
         
-        # 游戏对丢包敏感
-        if loss > 1:
+        # 游戏对丢包非常敏感
+        if loss > 2:
             gaming_score -= 40
+        elif loss > 1:
+            gaming_score -= 20
         elif loss > 0.5:
-            gaming_score -= 20
+            gaming_score -= 10
         
-        # 游戏对延迟敏感
-        if delay > 100:
-            gaming_score -= 40
-        elif delay > 50:
+        # 游戏对延迟敏感（国际游戏服务器通常延迟较高）
+        if delay > 150:
+            gaming_score -= 30
+        elif delay > 100:
             gaming_score -= 20
+        elif delay > 50:
+            gaming_score -= 10
         
         # 游戏对抖动敏感
-        if jitter > 30:
+        if jitter > 50:
             gaming_score -= 20
-        elif jitter > 10:
+        elif jitter > 20:
             gaming_score -= 10
         
         gaming_score = max(0, gaming_score)
@@ -228,28 +240,28 @@ class AdvancedIPTester:
         rtc_score = 100
         
         # RTC对丢包非常敏感
-        if loss > 2:
-            rtc_score -= 50
-        elif loss > 1:
+        if loss > 1:
             rtc_score -= 30
         elif loss > 0.5:
-            rtc_score -= 15
+            rtc_score -= 20
+        elif loss > 0.1:
+            rtc_score -= 10
         
         # RTC对抖动非常敏感
         if jitter > 30:
-            rtc_score -= 40
+            rtc_score -= 30
         elif jitter > 20:
-            rtc_score -= 25
+            rtc_score -= 20
         elif jitter > 10:
             rtc_score -= 10
         
-        # RTC对延迟敏感
-        if delay > 150:
-            rtc_score -= 25
-        elif delay > 100:
+        # RTC对延迟有一定容忍度
+        if delay > 200:
+            rtc_score -= 20
+        elif delay > 150:
             rtc_score -= 15
-        elif delay > 50:
-            rtc_score -= 5
+        elif delay > 100:
+            rtc_score -= 10
         
         rtc_score = max(0, rtc_score)
         
@@ -266,12 +278,36 @@ class AdvancedIPTester:
         return scores
     
     def _clean_target(self, target: str) -> str:
-        """清理目标字符串，移除端口和注释"""
+        """清理目标字符串，移除端口和注释，返回纯净的IP或域名"""
         clean_target = target.strip()
+        
+        # 先处理注释部分（#之后的内容）
         if '#' in clean_target:
             clean_target = clean_target.split('#')[0].strip()
+        
+        # 处理端口部分（:之后的内容）
+        # 但要注意IPv6地址中也有冒号，需要小心处理
         if ':' in clean_target:
-            clean_target = clean_target.split(':')[0].strip()
+            # 简单判断：如果包含多个冒号，可能是IPv6地址，不处理
+            if clean_target.count(':') <= 1:
+                # 可能是IPv4地址加端口或域名加端口
+                # 检查是否是有效的端口格式（冒号后是数字）
+                parts = clean_target.split(':')
+                if len(parts) == 2:
+                    ip_part, port_part = parts
+                    # 检查端口部分是否是数字
+                    if port_part.isdigit():
+                        clean_target = ip_part.strip()
+                    else:
+                        # 可能不是端口，保持原样
+                        clean_target = clean_target
+                else:
+                    # 多个冒号，可能是IPv6地址，保持原样
+                    clean_target = clean_target
+            else:
+                # IPv6地址，保持原样
+                clean_target = clean_target
+        
         return clean_target
     
     def test_target(self, target: str) -> Dict:
@@ -370,7 +406,7 @@ class AdvancedIPTester:
     
     def test_targets(self, targets: List[str]) -> List[Dict]:
         """
-        批量测试多个目标
+        批量测试多个目标（并发执行）
         
         Args:
             targets: 目标列表
@@ -378,16 +414,64 @@ class AdvancedIPTester:
         Returns:
             测试结果列表
         """
-        print(f"开始测试 {len(targets)} 个目标...")
+        print(f"开始测试 {len(targets)} 个目标（并发数: {self.max_workers}）...")
         self.results = []
         
-        for i, target in enumerate(targets):
-            print(f"[{i+1}/{len(targets)}] ", end='')
-            result = self.test_target(target)
-            self.results.append(result)
+        # 创建线程池
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有任务
+            future_to_target = {
+                executor.submit(self._test_target_with_progress, target, idx, len(targets)): (target, idx)
+                for idx, target in enumerate(targets)
+            }
+            
+            # 收集结果
+            for future in as_completed(future_to_target):
+                target, idx = future_to_target[future]
+                try:
+                    result = future.result()
+                    self.results.append(result)
+                except Exception as e:
+                    print(f"\n目标 {target} 测试时发生异常: {e}")
+                    self.results.append({
+                        'original': target,
+                        'target': self._clean_target(target),
+                        'ping': {},
+                        'tcp': {},
+                        'scores': {},
+                        'success': False,
+                        'error': str(e)
+                    })
         
-        print(f"测试完成，成功: {len([r for r in self.results if r['success']])}/{len(targets)}")
+        successful = len([r for r in self.results if r['success']])
+        print(f"\n测试完成，成功: {successful}/{len(targets)}")
         return self.results
+    
+    def _test_target_with_progress(self, target: str, idx: int, total: int) -> Dict:
+        """
+        包装test_target方法，添加进度显示（线程安全版本）
+        
+        Args:
+            target: 目标
+            idx: 目标索引
+            total: 总目标数
+            
+        Returns:
+            测试结果
+        """
+        # 使用锁确保输出不混乱
+        with self.print_lock:
+            # 显示进度
+            print(f"[{idx+1}/{total}] ", end='', flush=True)
+            
+            # 执行测试（test_target内部的打印也会受到锁保护）
+            result = self.test_target(target)
+            
+            # 如果测试失败，显示失败信息
+            if not result['success']:
+                print(f"{target}: 失败 - {result.get('error', '未知错误')}")
+        
+        return result
     
     def sort_results(self, sort_by: str = 'overall') -> List[Dict]:
         """
@@ -487,6 +571,109 @@ class AdvancedIPTester:
                         f.write(f"{target:<40} {error}\n")
         
         print(f"详细结果已保存到: {output_file}")
+    
+    def save_results_md(self, output_file: str = 'result_pro.md'):
+        """
+        保存结果到markdown格式文件
+        
+        Args:
+            output_file: 输出文件名
+        """
+        sorted_results = self.sort_results('overall')
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            # 写入markdown标题
+            f.write(f"# IP/域名质量测试报告\n\n")
+            f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(f"**测试目标数**: {len(self.results)}\n")
+            f.write(f"**成功数**: {len([r for r in self.results if r['success']])}\n")
+            f.write(f"**失败数**: {len([r for r in self.results if not r['success']])}\n\n")
+            
+            f.write("## 排序说明\n")
+            f.write("按综合评分降序排列（评分越高表示质量越好）\n\n")
+            
+            f.write("## 最佳结果（按综合评分排序）\n\n")
+            
+            # 创建成功结果的表格
+            successful_results = [r for r in sorted_results if r['success']]
+            if successful_results:
+                f.write("| 排名 | 目标 | 延迟(ms) | 丢包率(%) | 抖动(ms) | TCP连接(ms) | 综合评分 | 流媒体 | 游戏 | 实时通信 | 状态 |\n")
+                f.write("|------|------|----------|-----------|----------|-------------|----------|--------|------|----------|------|\n")
+                
+                rank = 1
+                for result in successful_results:
+                    target = result['original']
+                    if len(target) > 30:
+                        target = target[:27] + "..."
+                    
+                    delay = f"{result['ping'].get('avg_delay', 0):.1f}"
+                    loss = f"{result['ping'].get('loss_rate', 0):.1f}"
+                    jitter = f"{result['ping'].get('jitter', 0):.1f}"
+                    
+                    tcp_time = "N/A"
+                    if result['tcp'].get('success'):
+                        tcp_time = f"{result['tcp'].get('connect_time', 0):.1f}"
+                    
+                    scores = result['scores']
+                    overall = scores.get('overall', 0)
+                    streaming = scores.get('streaming', 0)
+                    gaming = scores.get('gaming', 0)
+                    rtc = scores.get('rtc', 0)
+                    
+                    # 根据评分添加颜色或表情符号
+                    def get_score_emoji(score):
+                        if score >= 80:
+                            return f"{score} 🟢"
+                        elif score >= 60:
+                            return f"{score} 🟡"
+                        elif score >= 40:
+                            return f"{score} 🟠"
+                        else:
+                            return f"{score} 🔴"
+                    
+                    overall_display = get_score_emoji(overall)
+                    streaming_display = get_score_emoji(streaming)
+                    gaming_display = get_score_emoji(gaming)
+                    rtc_display = get_score_emoji(rtc)
+                    
+                    f.write(f"| {rank} | {target} | {delay} | {loss} | {jitter} | {tcp_time} | {overall_display} | {streaming_display} | {gaming_display} | {rtc_display} | ✅ |\n")
+                    rank += 1
+            
+            # 失败结果部分
+            failed_results = [r for r in sorted_results if not r['success']]
+            if failed_results:
+                f.write("\n## 测试失败的目标\n\n")
+                f.write("| 目标 | 错误信息 |\n")
+                f.write("|------|----------|\n")
+                
+                for result in failed_results:
+                    target = result['original']
+                    if len(target) > 40:
+                        target = target[:37] + "..."
+                    error = result.get('error', '未知错误')
+                    f.write(f"| {target} | {error} |\n")
+            
+            # 添加评分说明
+            f.write("\n## 评分说明\n\n")
+            f.write("评分范围：0-100分，分数越高表示质量越好\n\n")
+            f.write("- 🟢 优秀 (80-100): 网络质量很好，适合所有应用\n")
+            f.write("- 🟡 良好 (60-79): 网络质量良好，大部分应用运行流畅\n")
+            f.write("- 🟠 一般 (40-59): 网络质量一般，某些应用可能会有问题\n")
+            f.write("- 🔴 较差 (0-39): 网络质量较差，建议更换节点或优化网络\n\n")
+            
+            f.write("### 各项评分含义\n")
+            f.write("- **综合评分**: 总体网络质量评估（加权平均）\n")
+            f.write("- **流媒体评分**: 适合视频流媒体、大文件下载\n")
+            f.write("- **游戏评分**: 适合在线游戏、实时对战\n")
+            f.write("- **实时通信评分**: 适合视频通话、语音聊天\n\n")
+            
+            f.write("### 指标说明\n")
+            f.write("- **延迟**: 数据包往返时间，越低越好\n")
+            f.write("- **丢包率**: 数据包丢失比例，越低越好\n")
+            f.write("- **抖动**: 延迟的变化程度，越低越稳定\n")
+            f.write("- **TCP连接时间**: TCP握手建立时间，反映连接速度\n")
+        
+        print(f"Markdown格式结果已保存到: {output_file}")
         
     def display_summary(self, top_n: int = 20):
         """
@@ -577,7 +764,8 @@ def main():
     config = {
         'ping_count': 10,      # 每个目标ping 10次，以获得准确的抖动计算
         'ping_timeout': 2,     # ping超时2秒
-        'tcp_timeout': 5       # TCP连接超时5秒
+        'tcp_timeout': 5,      # TCP连接超时5秒
+        'max_workers': 10      # 并发线程数，默认10
     }
     
     # 创建测试器
@@ -593,11 +781,17 @@ def main():
     # 显示摘要
     tester.display_summary(20)
     
-    # 保存结果
+    # 保存结果（Markdown格式，更易查看）
+    tester.save_results_md('result_pro.md')
+    
+    # 同时保存一份txt格式作为备份
     tester.save_results('result_pro.txt')
     
-    print(f"\n测试完成！详细结果请查看 result_pro.txt")
+    print(f"\n测试完成！")
+    print(f"主要结果（Markdown格式，推荐）: result_pro.md")
+    print(f"备份结果（文本格式）: result_pro.txt")
     print("结果包含：延迟、丢包率、抖动、TCP连接时间、综合评分、流媒体评分、游戏评分、实时通信评分")
+    print("Markdown文件可以用浏览器、Markdown编辑器或支持Markdown的文本编辑器查看")
 
 
 if __name__ == '__main__':
