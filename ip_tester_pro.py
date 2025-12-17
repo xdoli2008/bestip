@@ -12,6 +12,8 @@ import sys
 import statistics
 import socket
 import threading
+import urllib.request
+import json
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -674,7 +676,157 @@ class AdvancedIPTester:
             f.write("- **TCP连接时间**: TCP握手建立时间，反映连接速度\n")
         
         print(f"Markdown格式结果已保存到: {output_file}")
+    
+    def get_country_from_ip(self, ip: str) -> Tuple[str, str]:
+        """
+        查询IP的国家信息（支持多个API源）
         
+        Args:
+            ip: IP地址或域名
+            
+        Returns:
+            Tuple[国家代码, 国家名称] 例如: ('KR', 'South Korea')
+            查询失败时返回 ('未知', 'Unknown')
+        """
+        # 先检查是否是域名，如果是则解析为IP
+        target_ip = ip
+        if not self._is_valid_ip(ip):
+            try:
+                target_ip = socket.gethostbyname(ip)
+            except socket.gaierror:
+                return ('未知', 'Unknown')
+        
+        # API列表，按优先级排序
+        apis = [
+            {
+                'name': 'ipapi.co',
+                'url': f'https://ipapi.co/{target_ip}/json/',
+                'code_key': 'country_code',
+                'name_key': 'country_name'
+            },
+            {
+                'name': 'ipinfo.io',
+                'url': f'https://ipinfo.io/{target_ip}/json',
+                'code_key': 'country',
+                'name_key': 'country'
+            },
+            {
+                'name': 'freegeoip.app',
+                'url': f'https://freegeoip.app/json/{target_ip}',
+                'code_key': 'country_code',
+                'name_key': 'country_name'
+            }
+        ]
+        
+        # 尝试每个API
+        for api in apis:
+            try:
+                with urllib.request.urlopen(api['url'], timeout=5) as response:
+                    data = json.load(response)
+                    
+                    # 获取国家代码和名称
+                    code = data.get(api['code_key'], '未知')
+                    name = data.get(api['name_key'], 'Unknown')
+                    
+                    # 如果获取到有效数据，返回结果
+                    if code and code != '未知' and code != 'Unknown':
+                        return (code, name)
+            except Exception:
+                continue
+        
+        # 所有API都失败，返回未知
+        return ('未知', 'Unknown')
+    
+    def _is_valid_ip(self, address: str) -> bool:
+        """
+        检查字符串是否为有效的IP地址
+        
+        Args:
+            address: 要检查的字符串
+            
+        Returns:
+            True如果是有效IP，False否则
+        """
+        try:
+            socket.inet_aton(address)
+            return True
+        except socket.error:
+            try:
+                socket.inet_pton(socket.AF_INET6, address)
+                return True
+            except:
+                return False
+    
+    def generate_new_alias(self, result: Dict) -> str:
+        """
+        生成新别名格式: #国家-延迟ms-综合评分
+        
+        示例: #韩国-64ms-97分
+        
+        Args:
+            result: 测试结果字典
+            
+        Returns:
+            新别名字符串
+        """
+        # 获取地理位置
+        ip = result['target']  # 清理后的IP
+        country_code, _ = self.get_country_from_ip(ip)
+        
+        # 获取测试数据
+        delay = int(result['ping']['avg_delay'])
+        score = result['scores']['overall']
+        
+        # 生成别名
+        return f"#{country_code}-{delay}ms-{score}分"
+    
+    def save_top_results(self, output_file: str = 'ip.txt', top_n: int = 15):
+        """
+        保存前N名结果到文件（带新别名）
+        
+        格式: IP:端口#国家-延迟ms-综合评分
+        
+        Args:
+            output_file: 输出文件名
+            top_n: 保存前N个结果
+        """
+        # 按综合评分排序
+        sorted_results = self.sort_results('overall')
+        
+        # 过滤成功的结果，取前N个
+        top_results = [r for r in sorted_results if r['success']][:top_n]
+        
+        if not top_results:
+            print(f"警告: 没有成功的测试结果，{output_file}未更新")
+            return
+        
+        # 写入文件
+        with open(output_file, 'w', encoding='utf-8') as f:
+            for result in top_results:
+                # 获取基础信息
+                original = result['original']
+                clean_target = result['target']
+                
+                # 提取端口（如果有）
+                port = ""
+                if ':' in original and original.count(':') <= 1:
+                    parts = original.split(':')
+                    if len(parts) == 2 and parts[1].split('#')[0].isdigit():
+                        port = f":{parts[1].split('#')[0]}"
+                
+                # 生成新别名
+                new_alias = self.generate_new_alias(result)
+                
+                # 组合新行: IP:端口#新别名
+                new_line = f"{clean_target}{port}{new_alias}\n"
+                f.write(new_line)
+        
+        print(f"✓ 已将前{len(top_results)}个优质节点保存到 {output_file}")
+        print("\n保存的节点:")
+        for i, result in enumerate(top_results, 1):
+            alias = self.generate_new_alias(result)
+            print(f"  {i}. {result['target']}{alias}")
+    
     def display_summary(self, top_n: int = 20):
         """
         显示测试摘要
@@ -752,9 +904,10 @@ def main():
     print("基于专业网络质量评估算法（延迟、丢包率、抖动、TCP性能、综合评分）")
     print("=" * 100)
     
-    # 读取目标列表
-    targets = read_targets_from_file('ip.txt')
-    print(f"从 ip.txt 读取到 {len(targets)} 个目标")
+    # 1. 从testip.txt读取测试目标
+    print("\n读取测试目标文件: testip.txt")
+    targets = read_targets_from_file('testip.txt')
+    print(f"成功读取 {len(targets)} 个测试目标\n")
     
     if not targets:
         print("错误: 没有找到可测试的目标")
@@ -781,17 +934,25 @@ def main():
     # 显示摘要
     tester.display_summary(20)
     
-    # 保存结果（Markdown格式，更易查看）
+    # 保存完整结果（Markdown格式，更易查看）
     tester.save_results_md('result_pro.md')
     
     # 同时保存一份txt格式作为备份
     tester.save_results('result_pro.txt')
     
+    # 保存前15名到ip.txt（带地理位置别名）
+    print("\n" + "="*60)
+    print("筛选质量最好的15个节点并生成地理位置别名...")
+    print("="*60 + "\n")
+    tester.save_top_results('ip.txt', 15)
+    
     print(f"\n测试完成！")
     print(f"主要结果（Markdown格式，推荐）: result_pro.md")
     print(f"备份结果（文本格式）: result_pro.txt")
+    print(f"优质节点列表（前15名）: ip.txt")
     print("结果包含：延迟、丢包率、抖动、TCP连接时间、综合评分、流媒体评分、游戏评分、实时通信评分")
     print("Markdown文件可以用浏览器、Markdown编辑器或支持Markdown的文本编辑器查看")
+    print("ip.txt包含格式: IP:端口#国家-延迟ms-综合评分")
 
 
 if __name__ == '__main__':
