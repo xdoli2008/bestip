@@ -759,9 +759,9 @@ class AdvancedIPTester:
     
     def generate_new_alias(self, result: Dict) -> str:
         """
-        生成新别名格式: #国家-延迟ms-综合评分
+        生成新别名格式: #域名/IP-国家-延迟ms-综合评分
         
-        示例: #韩国-64ms-97分
+        示例: #104.19.174.68-US-64ms-97分
         
         Args:
             result: 测试结果字典
@@ -769,16 +769,33 @@ class AdvancedIPTester:
         Returns:
             新别名字符串
         """
+        # 获取原始目标（包含域名）或清理后的IP
+        original_target = result['original']
+        clean_target = result['target']
+        
+        # 从原始目标中提取域名/IP部分（移除端口和注释）
+        display_target = clean_target
+        if '#' in original_target:
+            # 如果有注释，尝试提取注释前的IP/域名部分
+            base_part = original_target.split('#')[0].strip()
+            # 如果有端口，提取IP/域名部分
+            if ':' in base_part and base_part.count(':') <= 1:
+                display_target = base_part.split(':')[0].strip()
+            else:
+                display_target = base_part
+        elif ':' in original_target and original_target.count(':') <= 1:
+            # 如果有端口但没有注释
+            display_target = original_target.split(':')[0].strip()
+        
         # 获取地理位置
-        ip = result['target']  # 清理后的IP
-        country_code, _ = self.get_country_from_ip(ip)
+        country_code, _ = self.get_country_from_ip(clean_target)
         
         # 获取测试数据
         delay = int(result['ping']['avg_delay'])
         score = result['scores']['overall']
         
-        # 生成别名
-        return f"#{country_code}-{delay}ms-{score}分"
+        # 生成别名（包含IP/域名）
+        return f"#{display_target}-{country_code}-{delay}ms-{score}分"
     
     def save_top_results(self, output_file: str = 'ip.txt', top_n: int = 15):
         """
