@@ -1234,7 +1234,7 @@ class AdvancedIPTester:
                             port = f":{port_part}"
 
                 # 从原始输入中提取国家代码
-                country_code = "未知"
+                country_code = None
                 if '#' in original:
                     # 格式: IP:port#Country-频道@kejiland00
                     # 提取#后面的部分
@@ -1243,12 +1243,24 @@ class AdvancedIPTester:
                     if '-' in comment_part:
                         country_code = comment_part.split('-')[0].strip()
                     else:
-                        # 如果没有-，可能整个就是国家代码
-                        country_code = comment_part.strip()
+                        # 如果没有-，可能是广告信息，忽略
+                        if '频道' in comment_part or '@' in comment_part or '加入' in comment_part:
+                            country_code = None
+                        else:
+                            # 否则整个就是国家代码
+                            country_code = comment_part.strip()
 
                 # 如果没有从原始输入提取到，尝试查询地理位置
-                if country_code == "未知" or not country_code:
-                    country_code, _ = self.get_country_from_ip(clean_target)
+                if not country_code:
+                    # 判断是否为域名（包含字母）
+                    if any(c.isalpha() for c in clean_target):
+                        # 域名直接使用自身作为标识
+                        country_code = clean_target
+                    else:
+                        # IP地址才查询地理位置
+                        country_code, _ = self.get_country_from_ip(clean_target)
+                        if not country_code:
+                            country_code = clean_target  # 如果查询失败，使用IP本身
 
                 # 组合新行: IP:端口#国家代码
                 new_line = f"{clean_target}{port}#{country_code}\n"
@@ -1269,17 +1281,29 @@ class AdvancedIPTester:
                     if port_part.isdigit():
                         port = f":{port_part}"
 
-            # 提取国家代码
-            country_code = "未知"
+            # 提取国家代码（与保存逻辑一致）
+            country_code = None
             if '#' in original:
                 comment_part = original.split('#')[1]
                 if '-' in comment_part:
                     country_code = comment_part.split('-')[0].strip()
                 else:
-                    country_code = comment_part.strip()
+                    # 如果没有-，可能是广告信息，忽略
+                    if '频道' in comment_part or '@' in comment_part or '加入' in comment_part:
+                        country_code = None
+                    else:
+                        country_code = comment_part.strip()
 
-            if country_code == "未知" or not country_code:
-                country_code, _ = self.get_country_from_ip(clean_target)
+            if not country_code:
+                # 判断是否为域名（包含字母）
+                if any(c.isalpha() for c in clean_target):
+                    # 域名直接使用自身作为标识
+                    country_code = clean_target
+                else:
+                    # IP地址才查询地理位置
+                    country_code, _ = self.get_country_from_ip(clean_target)
+                    if not country_code:
+                        country_code = clean_target
 
             print(f"  {i}. {clean_target}{port}#{country_code}")
 
