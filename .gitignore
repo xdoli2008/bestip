@@ -133,7 +133,6 @@ cython_debug/
 Thumbs.db
 
 # 项目特定 - 输出文件
-data/output/*
 !data/output/.gitkeep
 
 # 项目特定 - 测试输出
@@ -143,3 +142,4 @@ tests/output/
 # 项目特定 - 临时文件
 test_best.txt
 *.tmp
+config.json

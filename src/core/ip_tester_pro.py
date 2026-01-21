@@ -24,11 +24,16 @@ try:
     from src.config.config import load_config, HTTP_TEST_URLS
     from src.analyzers.statistical_analyzer import StatisticalAnalyzer
     from src.analyzers.proxy_score_calculator import ProxyScoreCalculator
+    from src.utils.url_fetcher import fetch_targets_from_urls
 except ImportError:
     # 如果导入失败，使用默认值（向后兼容）
     HTTP_TEST_URLS = ['https://cp.cloudflare.com/generate_204']
     StatisticalAnalyzer = None
     ProxyScoreCalculator = None
+    # URL获取模块向后兼容
+    def fetch_targets_from_urls(urls, config=None):
+        print("警告: URL获取模块未安装")
+        return []
     def load_config(custom_config=None, test_mode=None):
         return custom_config or {}
 
@@ -1343,8 +1348,83 @@ def read_targets_from_file(filename: str = 'ip.txt') -> List[str]:
                     targets.append(line)
     except FileNotFoundError:
         print(f"错误: 文件 {filename} 不存在")
-        sys.exit(1)
-    
+        return []  # 改为返回空列表而不是退出，允许URL获取继续
+
+    return targets
+
+
+def load_targets(config: Dict) -> List[str]:
+    """
+    统一的目标加载函数，支持文件和URL两种方式
+
+    Args:
+        config: 配置字典
+
+    Returns:
+        目标列表
+    """
+    targets = []
+
+    # 1. 检查是否启用URL获取
+    enable_url = config.get('enable_url_fetch', False)
+    url_sources = config.get('url_sources', [])
+    merge_mode = config.get('merge_file_and_url', False)
+    fallback_to_file = config.get('fallback_to_file', True)
+
+    # 2. 从URL获取
+    if enable_url and url_sources:
+        print("\n" + "=" * 100)
+        print("从URL获取IP列表")
+        print("=" * 100)
+
+        url_targets = fetch_targets_from_urls(url_sources, config)
+
+        if url_targets:
+            print(f"\n[OK] 从URL成功获取 {len(url_targets)} 个目标")
+            targets.extend(url_targets)
+        else:
+            print("\n[WARN] 从URL获取失败或结果为空")
+
+    # 3. 从文件获取
+    file_path = 'data/input/testip.txt'
+
+    # 决定是否读取文件
+    should_read_file = False
+    if not enable_url:
+        # 未启用URL，使用文件（默认行为）
+        should_read_file = True
+    elif merge_mode:
+        # 合并模式，同时读取文件
+        should_read_file = True
+    elif not targets and fallback_to_file:
+        # URL失败且启用回退
+        should_read_file = True
+        print("\n回退到文件读取模式...")
+
+    if should_read_file:
+        print(f"\n读取测试目标文件: {file_path}")
+        file_targets = read_targets_from_file(file_path)
+
+        if file_targets:
+            print(f"[OK] 从文件成功读取 {len(file_targets)} 个目标")
+            targets.extend(file_targets)
+        else:
+            print(f"[WARN] 文件读取失败或为空")
+
+    # 4. 去重
+    if targets:
+        unique_targets = []
+        seen = set()
+        for target in targets:
+            if target not in seen:
+                seen.add(target)
+                unique_targets.append(target)
+
+        if len(targets) != len(unique_targets):
+            print(f"\n去重: {len(targets)} -> {len(unique_targets)} 个目标")
+
+        return unique_targets
+
     return targets
 
 
@@ -1355,28 +1435,34 @@ def main():
     print("基于专业网络质量评估算法（延迟、丢包率、抖动、TCP、HTTP、稳定性、综合评分）")
     print("=" * 100)
 
-    # 1. 从data/input/testip.txt读取测试目标
-    print("\n读取测试目标文件: data/input/testip.txt")
-    targets = read_targets_from_file('data/input/testip.txt')
-    print(f"成功读取 {len(targets)} 个测试目标\n")
+    # 1. 加载配置（使用balanced模式）
+    config = load_config(test_mode='balanced')
+
+    # 2. 加载测试目标（统一接口，支持文件和URL）
+    targets = load_targets(config)
 
     if not targets:
-        print("错误: 没有找到可测试的目标")
+        print("\n错误: 没有找到可测试的目标")
+        print("请检查:")
+        print("  1. 配置文件中的URL列表是否正确")
+        print("  2. data/input/testip.txt 文件是否存在且包含有效数据")
         sys.exit(1)
 
-    # 2. 加载配置（使用balanced模式）
-    config = load_config(test_mode='balanced')
-    print(f"测试模式: {config['test_mode']}")
+    print(f"\n总计: {len(targets)} 个测试目标")
+    print("=" * 100)
+
+    # 3. 显示测试配置
+    print(f"\n测试模式: {config['test_mode']}")
     print(f"  - 快速检测: {'启用' if config['enable_quick_check'] else '禁用'}")
     print(f"  - HTTP测试: {'启用' if config['enable_http_test'] else '禁用'}")
     print(f"  - 稳定性测试: {'启用' if config['enable_stability_test'] else '禁用'}")
     print(f"  - 并发数: 快速检测{config['quick_check_workers']}，深度测试{config['max_workers']}")
     print()
 
-    # 3. 创建测试器
+    # 4. 创建测试器
     tester = AdvancedIPTester(config)
 
-    # 4. 开始测试（使用两阶段测试流程）
+    # 5. 开始测试（使用两阶段测试流程）
     start_time = time.time()
     tester.test_targets_two_phase(targets)
     elapsed_time = time.time() - start_time

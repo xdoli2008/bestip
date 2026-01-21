@@ -1,0 +1,43 @@
+{
+  "_comment": "bestip 配置文件示例 - 复制此文件为 config.json 并修改",
+  
+  "url_config": {
+    "_comment": "URL输入配置",
+    "enable_url_fetch": false,
+    "url_sources": [
+      "https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt"
+    ],
+    "url_timeout": 15,
+    "url_retry_times": 3,
+    "url_retry_delay": 1,
+    "fallback_to_file": true,
+    "merge_file_and_url": false
+  },
+  
+  "test_config": {
+    "_comment": "测试模式配置",
+    "test_mode": "balanced",
+    "ping_count": 10,
+    "ping_timeout": 2,
+    "tcp_timeout": 5,
+    "max_workers": 10
+  },
+  
+  "quick_check_config": {
+    "_comment": "快速检测配置",
+    "enable_quick_check": true,
+    "quick_check_workers": 50,
+    "quick_ping_count": 1,
+    "quick_ping_timeout": 1,
+    "quick_tcp_timeout": 2
+  },
+  
+  "advanced_config": {
+    "_comment": "高级测试配置",
+    "enable_multi_round": true,
+    "test_rounds": 2,
+    "enable_http_test": true,
+    "enable_stability_test": true,
+    "stability_attempts": 10
+  }
+}

@@ -1,0 +1,44 @@
+====================================================================================================
+高级IP/域名质量测试报告
+生成时间: 2026-01-21 20:38:08
+====================================================================================================
+
+排序说明: 按综合评分降序排列（评分越高质量越好）
+
+排名   目标                             延迟(ms)     丢包率(%)     抖动(ms)     TCP连接(ms)    综合评分       流媒体        游戏         实时通信       状态        
+----------------------------------------------------------------------------------------------------------------------------------
+1    saas.sin.fan#加入频道@kejiland00   1.0        0.0        0.0        1.0          92         100        100        100        成功
+
+====================================================================================================
+测试失败的目标:
+----------------------------------------------------------------------------------------------------
+34.143.159.175:443#SG-频道@kejil           [Errno 22] Invalid argument
+80.66.85.115:8443#DE-频道@kejila           [Errno 22] Invalid argument
+89.169.13.12:443#DE-频道@kejilan           [Errno 22] Invalid argument
+195.54.174.216:2053#NL-频道@keji           [Errno 22] Invalid argument
+80.66.85.115:2053#DE-频道@kejila           [Errno 22] Invalid argument
+2.59.183.219:443#NL-频道@kejilan           [Errno 22] Invalid argument
+45.89.52.247:443#NL-频道@kejilan           [Errno 22] Invalid argument
+31.133.0.167:2053#PL-频道@kejila           [Errno 22] Invalid argument
+193.17.183.157:2053#ES-频道@keji           [Errno 22] Invalid argument
+194.9.6.32:48484#DE-频道@kejilan           [Errno 22] Invalid argument
+173.249.201.109:54443#US-频道@ke           [Errno 22] Invalid argument
+176.105.253.102:8443#PL-频道@kej           [Errno 22] Invalid argument
+121.165.101.69:19413#KR-频道@kej           [Errno 22] Invalid argument
+2.59.183.181:443#NL-频道@kejilan           [Errno 22] Invalid argument
+2.59.183.233:444#NL-频道@kejilan           [Errno 22] Invalid argument
+193.17.183.157:8443#ES-频道@keji           [Errno 22] Invalid argument
+173.249.210.53:17750#US-频道@kej           [Errno 22] Invalid argument
+5.39.249.146:443#DE-频道@kejilan           [Errno 22] Invalid argument
+195.135.253.29:443#LT-频道@kejil           [Errno 22] Invalid argument
+163.5.207.31:443#NL-频道@kejilan           [Errno 22] Invalid argument
+163.5.207.235:443#NL-频道@kejila           [Errno 22] Invalid argument
+2.56.204.183:443#AM-频道@kejilan           [Errno 22] Invalid argument
+89.169.13.242:443#DE-频道@kejila           [Errno 22] Invalid argument
+185.188.147.79:443#PL-频道@kejil           [Errno 22] Invalid argument
+176.109.106.61:8443#RU-频道@keji           [Errno 22] Invalid argument
+185.245.83.41:31687#GB-频道@keji           [Errno 22] Invalid argument
+185.94.29.46:2015#DE-频道@kejila           [Errno 22] Invalid argument
+194.58.33.218:443#DE-频道@kejila           [Errno 22] Invalid argument
+31.133.0.159:2053#PL-频道@kejila           [Errno 22] Invalid argument
+5.34.209.139:2053#LT-频道@kejila           [Errno 22] Invalid argument

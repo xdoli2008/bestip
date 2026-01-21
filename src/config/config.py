@@ -5,6 +5,8 @@
 定义所有测试配置参数和测试模式预设
 """
 
+import json
+import os
 from typing import Dict
 
 
@@ -44,6 +46,15 @@ DEFAULT_CONFIG = {
     # 新增配置 - 评分模式
     'scoring_mode': 'proxy',       # 评分模式：'proxy', 'vpn', 'general'
     'test_mode': 'balanced',       # 测试模式：'fast', 'balanced', 'thorough'
+
+    # URL获取配置（新增）
+    'enable_url_fetch': False,     # 是否启用URL获取（默认关闭，保持向后兼容）
+    'url_sources': [],             # URL列表
+    'url_timeout': 10,             # URL获取超时时间（秒）
+    'url_retry_times': 2,          # URL获取失败重试次数
+    'url_retry_delay': 1,          # 重试间隔（秒）
+    'fallback_to_file': True,      # URL全部失败时是否回退到文件读取
+    'merge_file_and_url': False,   # 是否合并文件和URL的结果
 }
 
 
@@ -96,26 +107,85 @@ HTTP_TEST_URLS = [
 ]
 
 
-def load_config(custom_config: Dict = None, test_mode: str = None) -> Dict:
+def load_config_from_file(config_file: str = 'config.json') -> Dict:
     """
-    加载配置
+    从JSON配置文件加载配置
 
     Args:
-        custom_config: 自定义配置字典
+        config_file: 配置文件路径（相对于项目根目录）
+
+    Returns:
+        配置字典，如果文件不存在则返回空字典
+    """
+    # 获取项目根目录（config.py所在目录的上两级）
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(current_dir))
+    config_path = os.path.join(project_root, config_file)
+
+    if not os.path.exists(config_path):
+        print(f"提示: 配置文件 {config_file} 不存在，使用默认配置")
+        return {}
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            file_config = json.load(f)
+
+        # 展平配置结构
+        flat_config = {}
+
+        # 合并url_config
+        if 'url_config' in file_config:
+            flat_config.update(file_config['url_config'])
+
+        # 合并test_config
+        if 'test_config' in file_config:
+            flat_config.update(file_config['test_config'])
+
+        # 合并quick_check_config
+        if 'quick_check_config' in file_config:
+            flat_config.update(file_config['quick_check_config'])
+
+        # 合并advanced_config
+        if 'advanced_config' in file_config:
+            flat_config.update(file_config['advanced_config'])
+
+        print(f"[OK] 成功加载配置文件: {config_file}")
+        return flat_config
+
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] 配置文件格式错误: {e}")
+        return {}
+    except Exception as e:
+        print(f"[ERROR] 读取配置文件失败: {e}")
+        return {}
+
+
+def load_config(custom_config: Dict = None, test_mode: str = None, config_file: str = 'config.json') -> Dict:
+    """
+    加载配置（优先级：自定义配置 > 配置文件 > 测试模式 > 默认配置）
+
+    Args:
+        custom_config: 自定义配置字典（优先级最高）
         test_mode: 测试模式（'fast', 'balanced', 'thorough'）
+        config_file: 配置文件路径（相对于项目根目录）
 
     Returns:
         合并后的配置字典
     """
-    # 从默认配置开始
+    # 1. 从默认配置开始
     config = DEFAULT_CONFIG.copy()
 
-    # 如果指定了测试模式，应用模式预设
+    # 2. 如果指定了测试模式，应用模式预设
     if test_mode and test_mode in TEST_MODES:
         mode_config = TEST_MODES[test_mode]
         config.update(mode_config)
 
-    # 应用自定义配置（优先级最高）
+    # 3. 从配置文件加载（优先级高于测试模式）
+    file_config = load_config_from_file(config_file)
+    if file_config:
+        config.update(file_config)
+
+    # 4. 应用自定义配置（优先级最高）
     if custom_config:
         config.update(custom_config)
 
