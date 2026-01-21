@@ -14,16 +14,30 @@ import socket
 import threading
 import urllib.request
 import json
+import ssl
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 导入新模块
+try:
+    from src.config.config import load_config, HTTP_TEST_URLS
+    from src.analyzers.statistical_analyzer import StatisticalAnalyzer
+    from src.analyzers.proxy_score_calculator import ProxyScoreCalculator
+except ImportError:
+    # 如果导入失败，使用默认值（向后兼容）
+    HTTP_TEST_URLS = ['https://cp.cloudflare.com/generate_204']
+    StatisticalAnalyzer = None
+    ProxyScoreCalculator = None
+    def load_config(custom_config=None, test_mode=None):
+        return custom_config or {}
 
 
 class AdvancedIPTester:
     def __init__(self, config: Dict = None):
         """
         初始化高级测试器
-        
+
         Args:
             config: 配置字典，包含测试参数
         """
@@ -34,6 +48,18 @@ class AdvancedIPTester:
         self.max_workers = self.config.get('max_workers', 10)  # 并发线程数，默认10
         self.print_lock = threading.Lock()  # 打印锁，用于同步输出
         self.results = []
+
+        # 新增配置参数
+        self.enable_quick_check = self.config.get('enable_quick_check', True)
+        self.quick_check_workers = self.config.get('quick_check_workers', 50)
+        self.quick_ping_count = self.config.get('quick_ping_count', 1)
+        self.quick_ping_timeout = self.config.get('quick_ping_timeout', 1)
+        self.quick_tcp_timeout = self.config.get('quick_tcp_timeout', 2)
+        self.enable_http_test = self.config.get('enable_http_test', True)
+        self.http_test_url = self.config.get('http_test_url', HTTP_TEST_URLS[0])
+        self.http_timeout = self.config.get('http_timeout', 10)
+        self.enable_stability_test = self.config.get('enable_stability_test', True)
+        self.stability_attempts = self.config.get('stability_attempts', 10)
         
     def parse_ping_output_detailed(self, output: str) -> Dict:
         """
@@ -150,7 +176,241 @@ class AdvancedIPTester:
             result['error'] = "连接被拒绝"
         except Exception as e:
             result['error'] = str(e)
-        
+
+        return result
+
+    def quick_availability_check(self, target: str, port: int = 443) -> Dict:
+        """
+        快速可用性检测（改进版，提高准确性）
+
+        改进点：
+        - 增加ping次数到3次（提高可靠性）
+        - 添加重试机制（最多2次重试）
+        - 更合理的超时设置
+
+        Args:
+            target: 目标主机
+            port: 测试端口（默认443）
+
+        Returns:
+            快速检测结果
+        """
+        result = {
+            'available': False,
+            'quick_delay': None,
+            'reason': None
+        }
+
+        clean_target = self._clean_target(target)
+
+        # 最多尝试2次（首次+1次重试）
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            try:
+                # 1. Ping测试（3次，超时1.5秒）
+                ping_count = 3
+                ping_timeout = 1500  # Windows使用毫秒
+
+                if sys.platform == 'win32':
+                    cmd = ['ping', '-n', str(ping_count), '-w', str(ping_timeout), clean_target]
+                    process = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='gbk',
+                        timeout=6  # 总超时：3次 × 1.5秒 + 缓冲
+                    )
+                else:
+                    cmd = ['ping', '-c', str(ping_count), '-W', '1', clean_target]
+                    process = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=6
+                    )
+
+                if process.returncode in [0, 1]:  # 0=成功，1=部分丢包
+                    # 提取所有延迟样本
+                    delay_pattern = r'时间[=<](\d+)ms|time[=<](\d+)ms'
+                    delays = re.findall(delay_pattern, process.stdout)
+
+                    if delays:
+                        # 计算平均延迟（提高准确性）
+                        delay_values = []
+                        for d in delays:
+                            delay_val = d[0] if d[0] else d[1]
+                            if delay_val:
+                                delay_values.append(float(delay_val))
+
+                        if delay_values:
+                            result['quick_delay'] = sum(delay_values) / len(delay_values)
+
+                            # 2. TCP连接测试（超时2.5秒）
+                            try:
+                                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                sock.settimeout(2.5)
+                                sock.connect((clean_target, port))
+                                sock.close()
+                                result['available'] = True
+                                return result  # 成功则立即返回
+                            except socket.timeout:
+                                result['reason'] = "TCP连接超时"
+                            except ConnectionRefusedError:
+                                result['reason'] = "TCP连接被拒绝"
+                            except Exception as e:
+                                result['reason'] = f"TCP连接失败: {str(e)}"
+                        else:
+                            result['reason'] = "无法提取延迟数据"
+                    else:
+                        result['reason'] = "Ping无响应"
+                else:
+                    result['reason'] = "Ping失败"
+
+            except subprocess.TimeoutExpired:
+                result['reason'] = "Ping超时"
+            except Exception as e:
+                result['reason'] = f"检测异常: {str(e)}"
+
+            # 如果第一次失败且还有重试机会，等待0.5秒后重试
+            if not result['available'] and attempt < max_attempts - 1:
+                time.sleep(0.5)
+                continue
+            else:
+                break
+
+        return result
+
+    def test_http_performance(self, target: str, port: int = 443) -> Dict:
+        """
+        HTTP/HTTPS性能测试
+
+        Args:
+            target: 目标主机
+            port: 测试端口（默认443）
+
+        Returns:
+            HTTP性能测试结果
+        """
+        result = {
+            'success': False,
+            'tls_handshake_time': None,  # TLS握手时间（ms）
+            'ttfb': None,  # 首字节时间（ms）
+            'total_time': None,  # 总响应时间（ms）
+            'status_code': None,
+            'error': None
+        }
+
+        try:
+            start_time = time.time()
+
+            # 创建HTTP请求
+            req = urllib.request.Request(
+                self.http_test_url,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+
+            # 创建SSL上下文（忽略证书验证以提高速度）
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            # 发送请求
+            with urllib.request.urlopen(req, timeout=self.http_timeout, context=ctx) as response:
+                # 记录首字节时间
+                ttfb_time = time.time()
+                result['ttfb'] = (ttfb_time - start_time) * 1000
+
+                # 读取响应
+                response.read()
+
+                # 记录总时间
+                end_time = time.time()
+                result['total_time'] = (end_time - start_time) * 1000
+                result['status_code'] = response.status
+                result['success'] = True
+
+        except urllib.error.HTTPError as e:
+            result['status_code'] = e.code
+            result['error'] = f"HTTP错误: {e.code}"
+        except urllib.error.URLError as e:
+            result['error'] = f"URL错误: {str(e.reason)}"
+        except socket.timeout:
+            result['error'] = "HTTP请求超时"
+        except Exception as e:
+            result['error'] = str(e)
+
+        return result
+
+    def test_connection_stability(self, target: str, port: int = 443) -> Dict:
+        """
+        连接稳定性测试
+
+        Args:
+            target: 目标主机
+            port: 测试端口（默认443）
+
+        Returns:
+            稳定性测试结果
+        """
+        result = {
+            'success_rate': 0.0,
+            'avg_connect_time': None,
+            'failed_attempts': 0,
+            'stability_score': 0
+        }
+
+        clean_target = self._clean_target(target)
+        connect_times = []
+        failed_count = 0
+
+        # 连续测试多次
+        for i in range(self.stability_attempts):
+            try:
+                start_time = time.time()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(self.tcp_timeout)
+                sock.connect((clean_target, port))
+                sock.close()
+
+                connect_time = (time.time() - start_time) * 1000
+                connect_times.append(connect_time)
+            except:
+                failed_count += 1
+
+        # 计算统计信息
+        success_count = self.stability_attempts - failed_count
+        result['success_rate'] = (success_count / self.stability_attempts) * 100
+        result['failed_attempts'] = failed_count
+
+        if connect_times:
+            result['avg_connect_time'] = statistics.mean(connect_times)
+
+        # 计算稳定性评分（0-100）
+        # 基于成功率和连接时间变异系数
+        if result['success_rate'] >= 90:
+            base_score = 90 + (result['success_rate'] - 90)
+        elif result['success_rate'] >= 80:
+            base_score = 70 + (result['success_rate'] - 80) * 2
+        elif result['success_rate'] >= 70:
+            base_score = 50 + (result['success_rate'] - 70) * 2
+        else:
+            base_score = result['success_rate'] * 0.7
+
+        # 如果有连接时间数据，考虑变异系数
+        if len(connect_times) > 1:
+            cv = (statistics.stdev(connect_times) / statistics.mean(connect_times)) * 100
+            if cv < 10:
+                cv_penalty = 0
+            elif cv < 20:
+                cv_penalty = 5
+            elif cv < 30:
+                cv_penalty = 10
+            else:
+                cv_penalty = 15
+            base_score -= cv_penalty
+
+        result['stability_score'] = int(max(0, min(100, base_score)))
+
         return result
     
     def calculate_quality_score(self, ping_result: Dict, tcp_result: Dict) -> Dict:
@@ -314,11 +574,11 @@ class AdvancedIPTester:
     
     def test_target(self, target: str) -> Dict:
         """
-        测试单个目标
-        
+        测试单个目标（增强版，包含所有新测试）
+
         Args:
             target: 域名或IP地址
-            
+
         Returns:
             完整的测试结果
         """
@@ -327,54 +587,80 @@ class AdvancedIPTester:
             'target': self._clean_target(target),
             'ping': {},
             'tcp': {},
+            'http': {},
+            'stability': {},
             'scores': {},
             'success': False,
             'error': None
         }
-        
+
+        # 提取端口
+        test_port = 443
+        if ':' in target:
+            try:
+                port_part = target.split(':')[1]
+                if '#' in port_part:
+                    port_part = port_part.split('#')[0]
+                test_port = int(port_part)
+            except:
+                pass
+
         try:
             # 1. Ping测试
             print(f"测试Ping: {result['target']}...")
             ping_result = self._run_ping_test(result['target'])
             result['ping'] = ping_result
-            
-            # 2. TCP测试（默认测试443端口，如果目标包含其他端口则使用该端口）
-            test_port = 443
-            if ':' in target:
-                try:
-                    port_part = target.split(':')[1]
-                    if '#' in port_part:
-                        port_part = port_part.split('#')[0]
-                    test_port = int(port_part)
-                except:
-                    pass
-            
+
+            if not ping_result['success']:
+                result['error'] = "Ping测试失败"
+                return result
+
+            # 2. TCP测试
             print(f"测试TCP连接: {result['target']}:{test_port}...")
             tcp_result = self.test_tcp_connection(result['target'], test_port)
             result['tcp'] = tcp_result
-            
-            # 3. 计算评分
-            if ping_result['success']:
-                scores = self.calculate_quality_score(ping_result, tcp_result)
-                result['scores'] = scores
-                result['success'] = True
-                
-                # 显示测试结果
-                print(f"  延迟: {ping_result['avg_delay']:.1f}ms, "
-                      f"丢包: {ping_result['loss_rate']:.1f}%, "
-                      f"抖动: {ping_result.get('jitter', 0):.1f}ms")
-                print(f"  评分: 总体{scores['overall']}, "
-                      f"流媒体{scores['streaming']}, "
-                      f"游戏{scores['gaming']}, "
-                      f"通话{scores['rtc']}")
+
+            # 3. HTTP性能测试（如果启用）
+            if self.enable_http_test:
+                print(f"测试HTTP性能: {result['target']}...")
+                http_result = self.test_http_performance(result['target'], test_port)
+                result['http'] = http_result
+
+            # 4. 连接稳定性测试（如果启用）
+            if self.enable_stability_test:
+                print(f"测试连接稳定性: {result['target']}...")
+                stability_result = self.test_connection_stability(result['target'], test_port)
+                result['stability'] = stability_result
+
+            # 5. 计算评分
+            if ProxyScoreCalculator:
+                # 使用新的代理评分算法
+                scores = ProxyScoreCalculator.calculate_proxy_score(result)
             else:
-                result['error'] = "Ping测试失败"
-                
+                # 使用原有评分算法（向后兼容）
+                scores = self.calculate_quality_score(ping_result, tcp_result)
+
+            result['scores'] = scores
+            result['success'] = True
+
+            # 显示测试结果
+            print(f"  延迟: {ping_result['avg_delay']:.1f}ms, "
+                  f"丢包: {ping_result['loss_rate']:.1f}%, "
+                  f"抖动: {ping_result.get('jitter', 0):.1f}ms")
+
+            if result['http'].get('success'):
+                print(f"  HTTP TTFB: {result['http']['ttfb']:.1f}ms")
+
+            if result['stability']:
+                print(f"  稳定性: {result['stability']['success_rate']:.1f}%")
+
+            print(f"  评分: 总体{scores.get('overall', 0)}")
+
         except Exception as e:
             result['error'] = str(e)
-        
+
         return result
-    
+
     def _run_ping_test(self, target: str) -> Dict:
         """执行Ping测试并返回结果"""
         try:
@@ -474,7 +760,68 @@ class AdvancedIPTester:
                 print(f"{target}: 失败 - {result.get('error', '未知错误')}")
         
         return result
-    
+
+    def test_targets_two_phase(self, targets: List[str]) -> List[Dict]:
+        """
+        两阶段测试流程（快速筛选 + 深度测试）
+
+        Args:
+            targets: 目标列表
+
+        Returns:
+            测试结果列表
+        """
+        if not self.enable_quick_check:
+            # 如果未启用快速检测，使用原有方法
+            return self.test_targets(targets)
+
+        print("=" * 60)
+        print("阶段1：快速可用性检测")
+        print("=" * 60)
+        print(f"开始快速检测 {len(targets)} 个目标（并发数: {self.quick_check_workers}）...")
+
+        available_targets = []
+        unavailable_count = 0
+
+        # 阶段1：快速检测
+        with ThreadPoolExecutor(max_workers=self.quick_check_workers) as executor:
+            future_to_target = {
+                executor.submit(self.quick_availability_check, target): target
+                for target in targets
+            }
+
+            for idx, future in enumerate(as_completed(future_to_target), 1):
+                target = future_to_target[future]
+                try:
+                    result = future.result()
+                    if result['available']:
+                        available_targets.append(target)
+                        delay_info = f", 延迟={result['quick_delay']:.0f}ms" if result['quick_delay'] else ""
+                        print(f"[{idx}/{len(targets)}] {self._clean_target(target)}: 可用{delay_info}")
+                    else:
+                        unavailable_count += 1
+                        reason = result.get('reason', '未知原因')
+                        print(f"[{idx}/{len(targets)}] {self._clean_target(target)}: 不可用 ({reason})")
+                except Exception as e:
+                    unavailable_count += 1
+                    print(f"[{idx}/{len(targets)}] {target}: 检测异常 - {str(e)}")
+
+        print(f"\n快速检测完成: 可用 {len(available_targets)}/{len(targets)}, "
+              f"不可用 {unavailable_count}/{len(targets)}")
+
+        if not available_targets:
+            print("\n没有可用的节点，测试结束。")
+            self.results = []
+            return self.results
+
+        # 阶段2：深度测试
+        print("\n" + "=" * 60)
+        print("阶段2：深度质量测试")
+        print("=" * 60)
+        print(f"开始深度测试 {len(available_targets)} 个可用目标（并发数: {self.max_workers}）...")
+
+        return self.test_targets(available_targets)
+
     def sort_results(self, sort_by: str = 'overall') -> List[Dict]:
         """
         对结果进行排序
@@ -838,12 +1185,99 @@ class AdvancedIPTester:
                 new_line = f"{clean_target}{port}{new_alias}\n"
                 f.write(new_line)
         
-        print(f"✓ 已将前{len(top_results)}个优质节点保存到 {output_file}")
+        print(f"[OK] 已将前{len(top_results)}个优质节点保存到 {output_file}")
         print("\n保存的节点:")
         for i, result in enumerate(top_results, 1):
             alias = self.generate_new_alias(result)
             print(f"  {i}. {result['target']}{alias}")
-    
+
+    def save_best_results(self, output_file: str = 'best.txt', top_n: int = 15):
+        """
+        保存前N名结果到文件（干净格式，无广告）
+
+        格式: IP:端口#国家代码
+        示例: 168.138.165.174:443#SG
+
+        Args:
+            output_file: 输出文件名
+            top_n: 保存前N个结果
+        """
+        # 按综合评分排序
+        sorted_results = self.sort_results('overall')
+
+        # 过滤成功的结果，取前N个
+        top_results = [r for r in sorted_results if r['success']][:top_n]
+
+        if not top_results:
+            print(f"警告: 没有成功的测试结果，{output_file}未更新")
+            return
+
+        # 写入文件
+        with open(output_file, 'w', encoding='utf-8') as f:
+            for result in top_results:
+                # 获取基础信息
+                original = result['original']
+                clean_target = result['target']
+
+                # 提取端口（如果有）
+                port = ""
+                if ':' in original and original.count(':') <= 1:
+                    parts = original.split(':')
+                    if len(parts) == 2:
+                        port_part = parts[1].split('#')[0]
+                        if port_part.isdigit():
+                            port = f":{port_part}"
+
+                # 从原始输入中提取国家代码
+                country_code = "未知"
+                if '#' in original:
+                    # 格式: IP:port#Country-频道@kejiland00
+                    # 提取#后面的部分
+                    comment_part = original.split('#')[1]
+                    # 提取国家代码（在-之前）
+                    if '-' in comment_part:
+                        country_code = comment_part.split('-')[0].strip()
+                    else:
+                        # 如果没有-，可能整个就是国家代码
+                        country_code = comment_part.strip()
+
+                # 如果没有从原始输入提取到，尝试查询地理位置
+                if country_code == "未知" or not country_code:
+                    country_code, _ = self.get_country_from_ip(clean_target)
+
+                # 组合新行: IP:端口#国家代码
+                new_line = f"{clean_target}{port}#{country_code}\n"
+                f.write(new_line)
+
+        print(f"[OK] 已将前{len(top_results)}个优质节点保存到 {output_file}（干净格式）")
+        print("\n保存的节点:")
+        for i, result in enumerate(top_results, 1):
+            original = result['original']
+            clean_target = result['target']
+
+            # 提取端口
+            port = ""
+            if ':' in original and original.count(':') <= 1:
+                parts = original.split(':')
+                if len(parts) == 2:
+                    port_part = parts[1].split('#')[0]
+                    if port_part.isdigit():
+                        port = f":{port_part}"
+
+            # 提取国家代码
+            country_code = "未知"
+            if '#' in original:
+                comment_part = original.split('#')[1]
+                if '-' in comment_part:
+                    country_code = comment_part.split('-')[0].strip()
+                else:
+                    country_code = comment_part.strip()
+
+            if country_code == "未知" or not country_code:
+                country_code, _ = self.get_country_from_ip(clean_target)
+
+            print(f"  {i}. {clean_target}{port}#{country_code}")
+
     def display_summary(self, top_n: int = 20):
         """
         显示测试摘要
@@ -915,61 +1349,70 @@ def read_targets_from_file(filename: str = 'ip.txt') -> List[str]:
 
 
 def main():
-    """主函数"""
+    """主函数（增强版）"""
     print("=" * 100)
-    print("高级IP/域名质量测试工具 - 专业版")
-    print("基于专业网络质量评估算法（延迟、丢包率、抖动、TCP性能、综合评分）")
+    print("高级IP/域名质量测试工具 - 代理/VPN专用优化版")
+    print("基于专业网络质量评估算法（延迟、丢包率、抖动、TCP、HTTP、稳定性、综合评分）")
     print("=" * 100)
-    
-    # 1. 从testip.txt读取测试目标
-    print("\n读取测试目标文件: testip.txt")
-    targets = read_targets_from_file('testip.txt')
+
+    # 1. 从data/input/testip.txt读取测试目标
+    print("\n读取测试目标文件: data/input/testip.txt")
+    targets = read_targets_from_file('data/input/testip.txt')
     print(f"成功读取 {len(targets)} 个测试目标\n")
-    
+
     if not targets:
         print("错误: 没有找到可测试的目标")
         sys.exit(1)
-    
-    # 配置参数
-    config = {
-        'ping_count': 10,      # 每个目标ping 10次，以获得准确的抖动计算
-        'ping_timeout': 2,     # ping超时2秒
-        'tcp_timeout': 5,      # TCP连接超时5秒
-        'max_workers': 10      # 并发线程数，默认10
-    }
-    
-    # 创建测试器
+
+    # 2. 加载配置（使用balanced模式）
+    config = load_config(test_mode='balanced')
+    print(f"测试模式: {config['test_mode']}")
+    print(f"  - 快速检测: {'启用' if config['enable_quick_check'] else '禁用'}")
+    print(f"  - HTTP测试: {'启用' if config['enable_http_test'] else '禁用'}")
+    print(f"  - 稳定性测试: {'启用' if config['enable_stability_test'] else '禁用'}")
+    print(f"  - 并发数: 快速检测{config['quick_check_workers']}，深度测试{config['max_workers']}")
+    print()
+
+    # 3. 创建测试器
     tester = AdvancedIPTester(config)
-    
-    # 开始测试
+
+    # 4. 开始测试（使用两阶段测试流程）
     start_time = time.time()
-    tester.test_targets(targets)
+    tester.test_targets_two_phase(targets)
     elapsed_time = time.time() - start_time
-    
+
     print(f"\n总测试时间: {elapsed_time:.1f}秒")
-    
-    # 显示摘要
+
+    # 5. 显示摘要
     tester.display_summary(20)
-    
-    # 保存完整结果（Markdown格式，更易查看）
-    tester.save_results_md('result_pro.md')
-    
-    # 同时保存一份txt格式作为备份
-    tester.save_results('result_pro.txt')
-    
-    # 保存前15名到ip.txt（带地理位置别名）
+
+    # 6. 保存完整结果（Markdown格式，更易查看）
+    tester.save_results_md('data/output/result_pro.md')
+
+    # 7. 同时保存一份txt格式作为备份
+    tester.save_results('data/output/result_pro.txt')
+
+    # 8. 保存前15名到ip.txt（带地理位置别名）
     print("\n" + "="*60)
     print("筛选质量最好的15个节点并生成地理位置别名...")
     print("="*60 + "\n")
-    tester.save_top_results('ip.txt', 15)
-    
+    tester.save_top_results('data/output/ip.txt', 15)
+
+    # 9. 保存干净格式的best.txt（无广告）
+    print("\n" + "="*60)
+    print("生成干净格式的优质节点列表...")
+    print("="*60 + "\n")
+    tester.save_best_results('data/output/best.txt', 15)
+
     print(f"\n测试完成！")
-    print(f"主要结果（Markdown格式，推荐）: result_pro.md")
-    print(f"备份结果（文本格式）: result_pro.txt")
-    print(f"优质节点列表（前15名）: ip.txt")
+    print(f"主要结果（Markdown格式，推荐）: data/output/result_pro.md")
+    print(f"备份结果（文本格式）: data/output/result_pro.txt")
+    print(f"优质节点列表（详细信息）: data/output/ip.txt")
+    print(f"优质节点列表（干净格式）: data/output/best.txt")
     print("结果包含：延迟、丢包率、抖动、TCP连接时间、综合评分、流媒体评分、游戏评分、实时通信评分")
     print("Markdown文件可以用浏览器、Markdown编辑器或支持Markdown的文本编辑器查看")
     print("ip.txt包含格式: IP:端口#国家-延迟ms-综合评分")
+    print("best.txt包含格式: IP:端口#国家代码（干净格式，无广告）")
 
 
 if __name__ == '__main__':
