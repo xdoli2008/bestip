@@ -65,7 +65,16 @@ class AdvancedIPTester:
         self.http_timeout = self.config.get('http_timeout', 10)
         self.enable_stability_test = self.config.get('enable_stability_test', True)
         self.stability_attempts = self.config.get('stability_attempts', 10)
-        
+
+        # 流媒体测试配置（新增）
+        self.enable_streaming_test = self.config.get('enable_streaming_test', False)
+        self.streaming_sites = self.config.get('streaming_sites', [])
+        self.streaming_timeout = self.config.get('streaming_timeout', 15)
+        self.streaming_concurrent = self.config.get('streaming_concurrent', True)
+
+        # 输出配置（新增）
+        self.max_results = self.config.get('max_results', 30)
+
     def parse_ping_output_detailed(self, output: str) -> Dict:
         """
         详细解析ping命令输出，提取所有延迟样本和统计信息
@@ -343,6 +352,148 @@ class AdvancedIPTester:
             result['error'] = "HTTP请求超时"
         except Exception as e:
             result['error'] = str(e)
+
+        return result
+
+    def test_streaming_sites(self, target: str, port: int = 443) -> Dict:
+        """
+        测试流媒体网站连通性和延迟
+
+        测试指定代理节点对多个流媒体网站的访问能力。
+        注意：当前实现为直连测试，不经过代理。
+
+        Args:
+            target: 目标主机（代理节点IP或域名）
+            port: 测试端口（默认443）
+
+        Returns:
+            包含所有网站测试结果和摘要的字典
+        """
+        results = {
+            'sites': {},
+            'summary': {
+                'available_count': 0,
+                'total_count': 0,
+                'avg_ttfb': None,
+                'availability_rate': 0.0
+            }
+        }
+
+        if not self.streaming_sites:
+            return results
+
+        results['summary']['total_count'] = len(self.streaming_sites)
+
+        # 如果启用并发测试
+        if self.streaming_concurrent and len(self.streaming_sites) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=min(4, len(self.streaming_sites))) as executor:
+                future_to_site = {
+                    executor.submit(self._test_single_streaming_site, site): site
+                    for site in self.streaming_sites
+                }
+
+                for future in as_completed(future_to_site):
+                    site = future_to_site[future]
+                    try:
+                        site_result = future.result()
+                        results['sites'][site] = site_result
+                    except Exception as e:
+                        results['sites'][site] = {
+                            'success': False,
+                            'ttfb': None,
+                            'total_time': None,
+                            'status_code': None,
+                            'error': f'测试异常: {str(e)}'
+                        }
+        else:
+            # 串行测试
+            for site in self.streaming_sites:
+                results['sites'][site] = self._test_single_streaming_site(site)
+
+        # 计算摘要统计
+        successful_sites = [r for r in results['sites'].values() if r['success']]
+        results['summary']['available_count'] = len(successful_sites)
+        results['summary']['availability_rate'] = (
+            len(successful_sites) / len(self.streaming_sites) * 100
+            if self.streaming_sites else 0.0
+        )
+
+        if successful_sites:
+            ttfb_values = [r['ttfb'] for r in successful_sites if r['ttfb'] is not None]
+            if ttfb_values:
+                results['summary']['avg_ttfb'] = statistics.mean(ttfb_values)
+
+        return results
+
+    def _test_single_streaming_site(self, site_url: str) -> Dict:
+        """
+        测试单个流媒体网站
+
+        Args:
+            site_url: 网站URL
+
+        Returns:
+            单个网站的测试结果
+        """
+        result = {
+            'success': False,
+            'ttfb': None,
+            'total_time': None,
+            'status_code': None,
+            'error': None
+        }
+
+        try:
+            start_time = time.time()
+
+            # 创建HTTP请求
+            req = urllib.request.Request(
+                site_url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+            )
+
+            # 创建SSL上下文
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            # 发送请求
+            with urllib.request.urlopen(req, timeout=self.streaming_timeout, context=ctx) as response:
+                # 记录首字节时间
+                ttfb_time = time.time()
+                result['ttfb'] = (ttfb_time - start_time) * 1000
+
+                # 读取少量数据（不需要完整响应）
+                response.read(1024)
+
+                # 记录总时间
+                end_time = time.time()
+                result['total_time'] = (end_time - start_time) * 1000
+                result['status_code'] = response.status
+                result['success'] = True
+
+        except urllib.error.HTTPError as e:
+            result['status_code'] = e.code
+            if e.code in [200, 301, 302, 403]:  # 某些状态码也算可访问
+                result['success'] = True
+                result['error'] = f'HTTP {e.code}'
+            else:
+                result['error'] = f'HTTP错误: {e.code}'
+        except urllib.error.URLError as e:
+            result['error'] = f'URL错误: {str(e.reason)}'
+        except socket.timeout:
+            result['error'] = '连接超时'
+        except Exception as e:
+            result['error'] = f'未知错误: {str(e)}'
 
         return result
 
@@ -631,7 +782,22 @@ class AdvancedIPTester:
                 http_result = self.test_http_performance(result['target'], test_port)
                 result['http'] = http_result
 
-            # 4. 连接稳定性测试（如果启用）
+            # 4. 流媒体网站测试（如果启用）
+            if self.enable_streaming_test:
+                print(f"测试流媒体网站可用性: {result['target']}...")
+                streaming_result = self.test_streaming_sites(result['target'], test_port)
+                result['streaming_sites'] = streaming_result['sites']
+                result['streaming_summary'] = streaming_result['summary']
+
+                # 显示摘要
+                summary = streaming_result['summary']
+                print(f"  流媒体: {summary['available_count']}/{summary['total_count']} 可用", end='')
+                if summary['avg_ttfb']:
+                    print(f", 平均延迟: {summary['avg_ttfb']:.1f}ms")
+                else:
+                    print()
+
+            # 5. 连接稳定性测试（如果启用）
             if self.enable_stability_test:
                 print(f"测试连接稳定性: {result['target']}...")
                 stability_result = self.test_connection_stability(result['target'], test_port)
@@ -911,7 +1077,25 @@ class AdvancedIPTester:
                            f"{jitter:<10} {tcp_time:<12} {overall:<10} "
                            f"{streaming:<10} {gaming:<10} {rtc:<10} 成功\n")
                     rank += 1
-            
+
+            # 流媒体测试摘要（如果启用）
+            if self.enable_streaming_test and any('streaming_summary' in r for r in sorted_results):
+                f.write("\n" + "=" * 100 + "\n")
+                f.write("流媒体网站可用性测试摘要:\n")
+                f.write("-" * 100 + "\n")
+
+                streaming_results = [r for r in sorted_results if r.get('streaming_summary') and r['success']]
+                for result in streaming_results[:10]:  # 只显示前10个
+                    target = result['original'][:40]
+                    summary = result['streaming_summary']
+                    available = summary['available_count']
+                    total = summary['total_count']
+                    rate = summary['availability_rate']
+                    avg_ttfb = summary.get('avg_ttfb')
+
+                    ttfb_str = f", 平均延迟: {avg_ttfb:.1f}ms" if avg_ttfb else ""
+                    f.write(f"{target:<40} 可用: {available}/{total} ({rate:.0f}%){ttfb_str}\n")
+
             # 写入失败的结果
             if any(not r['success'] for r in sorted_results):
                 f.write("\n" + "=" * 100 + "\n")
@@ -1006,7 +1190,92 @@ class AdvancedIPTester:
                         target = target[:37] + "..."
                     error = result.get('error', '未知错误')
                     f.write(f"| {target} | {error} |\n")
-            
+
+            # 流媒体网站测试结果（如果启用）
+            if self.enable_streaming_test and any('streaming_summary' in r for r in sorted_results):
+                f.write("\n## 流媒体网站可用性测试\n\n")
+
+                # 提取网站名称（简化显示）
+                site_names = {}
+                if self.streaming_sites:
+                    for site in self.streaming_sites:
+                        # 提取域名作为简称
+                        from urllib.parse import urlparse
+                        parsed = urlparse(site)
+                        domain = parsed.netloc.replace('www.', '')
+                        # 进一步简化
+                        if 'chatgpt' in domain:
+                            site_names[site] = 'ChatGPT'
+                        elif 'grok' in domain:
+                            site_names[site] = 'Grok'
+                        elif 'gemini' in domain:
+                            site_names[site] = 'Gemini'
+                        elif 'youtube' in domain:
+                            site_names[site] = 'YouTube'
+                        else:
+                            site_names[site] = domain.split('.')[0].title()
+
+                # 创建表头
+                header_cols = ['排名', '目标']
+                for site in self.streaming_sites:
+                    header_cols.append(site_names.get(site, site))
+                header_cols.extend(['可用数', '可用率'])
+
+                f.write('| ' + ' | '.join(header_cols) + ' |\n')
+                f.write('|' + '|'.join(['------' for _ in header_cols]) + '|\n')
+
+                # 按可用数和平均延迟排序
+                streaming_results = [r for r in sorted_results if r.get('streaming_summary')]
+                streaming_results.sort(
+                    key=lambda x: (
+                        -x['streaming_summary']['available_count'],
+                        x['streaming_summary'].get('avg_ttfb', 999999) or 999999
+                    )
+                )
+
+                # 写入数据行
+                for rank, result in enumerate(streaming_results, 1):
+                    target = result['original']
+                    if len(target) > 25:
+                        target = target[:22] + "..."
+
+                    row = [str(rank), target]
+
+                    # 每个网站的测试结果
+                    sites_data = result.get('streaming_sites', {})
+                    for site in self.streaming_sites:
+                        site_result = sites_data.get(site, {})
+                        if site_result.get('success'):
+                            ttfb = site_result.get('ttfb')
+                            if ttfb:
+                                row.append(f"✅ {ttfb:.0f}ms")
+                            else:
+                                row.append("✅")
+                        else:
+                            error = site_result.get('error', '失败')
+                            # 简化错误信息
+                            if '超时' in error:
+                                row.append("❌ 超时")
+                            elif 'HTTP' in error:
+                                row.append(f"❌ {error}")
+                            else:
+                                row.append("❌ 失败")
+
+                    # 可用数和可用率
+                    summary = result['streaming_summary']
+                    available = summary['available_count']
+                    total = summary['total_count']
+                    rate = summary['availability_rate']
+                    row.append(f"{available}/{total}")
+                    row.append(f"{rate:.0f}%")
+
+                    f.write('| ' + ' | '.join(row) + ' |\n')
+
+                f.write("\n### 流媒体测试说明\n")
+                f.write("- ✅ 表示网站可访问，数字为首字节响应时间（TTFB）\n")
+                f.write("- ❌ 表示网站不可访问或超时\n")
+                f.write("- 可用率 = 可访问网站数 / 总测试网站数\n\n")
+
             # 添加评分说明
             f.write("\n## 评分说明\n\n")
             f.write("评分范围：0-100分，分数越高表示质量越好\n\n")
@@ -1540,7 +1809,7 @@ def main():
     print("\n" + "="*60)
     print("生成干净格式的优质节点列表...")
     print("="*60 + "\n")
-    tester.save_best_results('data/output/best.txt', 15)
+    tester.save_best_results('data/output/best.txt', tester.max_results)
 
     print(f"\n测试完成！")
     print(f"主要结果（Markdown格式，推荐）: data/output/result_pro.md")

@@ -132,8 +132,6 @@ cython_debug/
 # Windows
 Thumbs.db
 
-# 项目特定 - 输出文件
-!data/output/.gitkeep
 
 # 项目特定 - 测试输出
 tests/output/
@@ -143,3 +141,8 @@ tests/output/
 test_best.txt
 *.tmp
 config.json
+config.yaml
+config.yml
+
+# 项目特定 - 测试脚本
+test_*.py

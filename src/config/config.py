@@ -9,6 +9,15 @@ import json
 import os
 from typing import Dict
 
+# 尝试导入 YAML 支持
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+    print("[提示] PyYAML 未安装，仅支持 JSON 配置文件")
+    print("       安装方法: pip install pyyaml")
+
 
 # 默认配置
 DEFAULT_CONFIG = {
@@ -61,6 +70,20 @@ DEFAULT_CONFIG = {
     'custom_file_path': 'data/input/custom.txt',  # 自定义文件路径
     'merge_custom_with_url': True,        # 是否合并自定义文件和URL结果
     'custom_file_priority': 'before_url', # 自定义文件优先级：'before_url' 或 'after_url'
+
+    # 流媒体网站测试配置（新增）
+    'enable_streaming_test': False,       # 是否启用流媒体测试（默认关闭）
+    'streaming_sites': [                  # 流媒体网站列表
+        'https://chatgpt.com',
+        'https://grok.com',
+        'https://gemini.google.com',
+        'https://www.youtube.com'
+    ],
+    'streaming_timeout': 15,              # 流媒体测试超时（秒）
+    'streaming_concurrent': True,         # 是否并发测试多个网站
+
+    # 输出配置（新增）
+    'max_results': 30,                    # 保存的最大结果数量（默认30）
 }
 
 
@@ -113,12 +136,22 @@ HTTP_TEST_URLS = [
 ]
 
 
-def load_config_from_file(config_file: str = 'config.json') -> Dict:
+# 默认流媒体网站列表
+DEFAULT_STREAMING_SITES = [
+    'https://chatgpt.com',
+    'https://grok.com',
+    'https://gemini.google.com',
+    'https://www.youtube.com'
+]
+
+
+def load_config_from_file(config_file: str = None) -> Dict:
     """
-    从JSON配置文件加载配置
+    从 YAML 配置文件加载配置
 
     Args:
         config_file: 配置文件路径（相对于项目根目录）
+                    如果为 None，自动按优先级查找：config.yaml > config.yml
 
     Returns:
         配置字典，如果文件不存在则返回空字典
@@ -126,51 +159,59 @@ def load_config_from_file(config_file: str = 'config.json') -> Dict:
     # 获取项目根目录（config.py所在目录的上两级）
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(current_dir))
+
+    # 如果未指定文件，按优先级查找
+    if config_file is None:
+        candidates = ['config.yaml', 'config.yml']
+        for candidate in candidates:
+            candidate_path = os.path.join(project_root, candidate)
+            if os.path.exists(candidate_path):
+                config_file = candidate
+                break
+        else:
+            print("提示: 未找到配置文件 (config.yaml/config.yml)，使用默认配置")
+            return {}
+
     config_path = os.path.join(project_root, config_file)
 
     if not os.path.exists(config_path):
         print(f"提示: 配置文件 {config_file} 不存在，使用默认配置")
         return {}
 
+    # 检查文件扩展名
+    file_ext = os.path.splitext(config_file)[1].lower()
+
+    if file_ext not in ['.yaml', '.yml']:
+        print(f"[ERROR] 不支持的配置文件格式: {file_ext}")
+        print("        请使用 YAML 格式 (.yaml 或 .yml)")
+        return {}
+
     try:
+        # 加载 YAML 文件
+        if not YAML_AVAILABLE:
+            print(f"[ERROR] 无法加载 YAML 文件 {config_file}，PyYAML 未安装")
+            print("        安装方法: pip install pyyaml")
+            return {}
+
         with open(config_path, 'r', encoding='utf-8') as f:
-            file_config = json.load(f)
+            file_config = yaml.safe_load(f)
 
-        # 展平配置结构
-        flat_config = {}
-
-        # 合并url_config
-        if 'url_config' in file_config:
-            flat_config.update(file_config['url_config'])
-
-        # 合并custom_file_config
-        if 'custom_file_config' in file_config:
-            flat_config.update(file_config['custom_file_config'])
-
-        # 合并test_config
-        if 'test_config' in file_config:
-            flat_config.update(file_config['test_config'])
-
-        # 合并quick_check_config
-        if 'quick_check_config' in file_config:
-            flat_config.update(file_config['quick_check_config'])
-
-        # 合并advanced_config
-        if 'advanced_config' in file_config:
-            flat_config.update(file_config['advanced_config'])
+        if not file_config:
+            print(f"[WARNING] 配置文件 {config_file} 为空")
+            return {}
 
         print(f"[OK] 成功加载配置文件: {config_file}")
-        return flat_config
+        return file_config
 
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] 配置文件格式错误: {e}")
+    except yaml.YAMLError as e:
+        print(f"[ERROR] YAML 配置文件格式错误: {e}")
         return {}
     except Exception as e:
         print(f"[ERROR] 读取配置文件失败: {e}")
         return {}
 
 
-def load_config(custom_config: Dict = None, test_mode: str = None, config_file: str = 'config.json') -> Dict:
+def load_config(custom_config: Dict = None, test_mode: str = None, config_file: str = None) -> Dict:
     """
     加载配置（优先级：自定义配置 > 配置文件 > 测试模式 > 默认配置）
 
