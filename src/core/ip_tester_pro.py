@@ -55,6 +55,15 @@ class AdvancedIPTester:
         self.print_lock = threading.Lock()  # 打印锁，用于同步输出
         self.results = []
 
+        # 颜色常量 (ANSI)
+        self.CLR_G = "\033[92m"  # Green
+        self.CLR_Y = "\033[93m"  # Yellow
+        self.CLR_R = "\033[91m"  # Red
+        self.CLR_B = "\033[94m"  # Blue
+        self.CLR_C = "\033[96m"  # Cyan
+        self.CLR_0 = "\033[0m"   # Reset
+        self.CLR_BOLD = "\033[1m"
+
         # 新增配置参数
         self.enable_quick_check = self.config.get('enable_quick_check', True)
         self.quick_check_workers = self.config.get('quick_check_workers', 50)
@@ -76,6 +85,21 @@ class AdvancedIPTester:
 
         # 输出配置（新增）
         self.max_results = self.config.get('max_results', 30)
+
+    def _get_score_color(self, score: int) -> str:
+        """根据评分获取颜色"""
+        if score >= 80: return self.CLR_G
+        if score >= 60: return self.CLR_Y
+        if score >= 40: return self.CLR_B
+        return self.CLR_R
+
+    def _get_score_emoji(self, score: int) -> str:
+        """根据评分获取 Emoji"""
+        if score >= 90: return "🚀"
+        if score >= 80: return "✅"
+        if score >= 60: return "⚡"
+        if score >= 40: return "⚠️"
+        return "❌"
 
     def parse_ping_output_detailed(self, output: str) -> Dict:
         """
@@ -1200,80 +1224,100 @@ class AdvancedIPTester:
         
         with open(output_file, 'w', encoding='utf-8') as f:
             # 写入markdown标题
-            f.write(f"# IP/域名质量测试报告\n\n")
-            f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"**测试目标数**: {len(self.results)}\n")
-            f.write(f"**成功数**: {len([r for r in self.results if r['success']])}\n")
-            f.write(f"**失败数**: {len([r for r in self.results if not r['success']])}\n\n")
+            f.write(f"# 🚀 IP/域名质量测试报告\n\n")
+            f.write(f"📅 **生成时间**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n")
             
-            f.write("## 排序说明\n")
+            # 摘要卡片
+            success_count = len([r for r in self.results if r['success']])
+            fail_count = len(self.results) - success_count
+            f.write("> **📊 测试统计**\n")
+            f.write(f"> - 总目标数: `{len(self.results)}`\n")
+            f.write(f"> - 成功节点: `{success_count}` ✅\n")
+            f.write(f"> - 失败节点: `{fail_count}` ❌\n\n")
+            
+            f.write("## 📝 排序说明\n")
             f.write("按综合评分降序排列（评分越高表示质量越好）。\n")
             if self.enable_streaming_test:
-                f.write("网站连通性测试（streaming_sites）仅用于展示，不参与综合评分与排序。\n")
+                f.write("- **网站连通性测试**：仅用于展示，不参与综合评分与排序。\n")
             if self.enable_http_test and not self.score_include_http:
-                f.write("HTTP性能测试（http_test_url）仅用于展示，不参与综合评分与排序。\n")
+                f.write("- **HTTP性能测试**：仅用于展示，不参与综合评分与排序。\n")
             f.write("\n")
             
-            f.write("## 最佳结果（按综合评分排序）\n\n")
+            f.write("## 🏆 最佳结果（Top 优质节点）\n\n")
             
             # 创建成功结果的表格
             successful_results = [r for r in sorted_results if r['success']]
             if successful_results:
-                f.write("| 排名 | 目标 | 延迟(ms) | 丢包率(%) | 抖动(ms) | TCP连接(ms) | 综合评分 | 流媒体 | 游戏 | 实时通信 | 状态 |\n")
-                f.write("|------|------|----------|-----------|----------|-------------|----------|--------|------|----------|------|\n")
+                f.write("| 排名 | 目标 | 延迟 | 丢包 | 抖动 | TCP连接 | 综合评分 | 状态 |\n")
+                f.write("|:---:|:---|:---:|:---:|:---:|:---:|:---|:---:|\n")
                 
                 rank = 1
                 for result in successful_results:
                     target = result['original']
-                    if len(target) > 30:
-                        target = target[:27] + "..."
+                    if len(target) > 35:
+                        target = target[:32] + "..."
                     
-                    delay = f"{result['ping'].get('avg_delay', 0):.1f}"
-                    loss = f"{result['ping'].get('loss_rate', 0):.1f}"
-                    jitter = f"{result['ping'].get('jitter', 0):.1f}"
+                    delay = f"{result['ping'].get('avg_delay', 0):.1f}ms"
+                    loss = f"{result['ping'].get('loss_rate', 0):.1f}%"
+                    jitter = f"{result['ping'].get('jitter', 0):.1f}ms"
                     
                     tcp_time = "N/A"
                     if result['tcp'].get('success'):
-                        tcp_time = f"{result['tcp'].get('connect_time', 0):.1f}"
+                        tcp_time = f"{result['tcp'].get('connect_time', 0):.1f}ms"
                     
                     scores = result['scores']
                     overall = scores.get('overall', 0)
-                    streaming = scores.get('streaming', 0)
-                    gaming = scores.get('gaming', 0)
-                    rtc = scores.get('rtc', 0)
                     
-                    # 根据评分添加颜色或表情符号
-                    def get_score_emoji(score):
-                        if score >= 80:
-                            return f"{score} 🟢"
-                        elif score >= 60:
-                            return f"{score} 🟡"
-                        elif score >= 40:
-                            return f"{score} 🟠"
-                        else:
-                            return f"{score} 🔴"
+                    # 评分条
+                    def get_progress_bar(score):
+                        filled = int(score / 10)
+                        bar = "█" * filled + "░" * (10 - filled)
+                        emoji = self._get_score_emoji(score)
+                        return f"`{bar}` **{score}** {emoji}"
                     
-                    overall_display = get_score_emoji(overall)
-                    streaming_display = get_score_emoji(streaming)
-                    gaming_display = get_score_emoji(gaming)
-                    rtc_display = get_score_emoji(rtc)
+                    overall_display = get_progress_bar(overall)
                     
-                    f.write(f"| {rank} | {target} | {delay} | {loss} | {jitter} | {tcp_time} | {overall_display} | {streaming_display} | {gaming_display} | {rtc_display} | ✅ |\n")
+                    # 前三名高亮
+                    rank_str = str(rank)
+                    if rank == 1: rank_str = "🥇"
+                    elif rank == 2: rank_str = "🥈"
+                    elif rank == 3: rank_str = "🥉"
+                    
+                    f.write(f"| {rank_str} | `{target}` | {delay} | {loss} | {jitter} | {tcp_time} | {overall_display} | ✅ |\n")
                     rank += 1
             
+            # 详细评分表
+            if successful_results:
+                f.write("\n## 📋 详细场景评分\n\n")
+                f.write("| 排名 | 目标 | 综合 | 流媒体 | 游戏 | 实时通信 |\n")
+                f.write("|:---:|:---|:---:|:---:|:---:|:---:|\n")
+                
+                rank = 1
+                for result in successful_results:
+                    target = result['original']
+                    if len(target) > 25: target = target[:22] + "..."
+                    
+                    scores = result['scores']
+                    
+                    def fmt_score(s):
+                        if s >= 80: return f"**{s}** 🟢"
+                        if s >= 60: return f"{s} 🟡"
+                        return f"{s} 🔴"
+
+                    f.write(f"| {rank} | `{target}` | {fmt_score(scores.get('overall', 0))} | {fmt_score(scores.get('streaming', 0))} | {fmt_score(scores.get('gaming', 0))} | {fmt_score(scores.get('rtc', 0))} |\n")
+                    rank += 1
+
             # 失败结果部分
             failed_results = [r for r in sorted_results if not r['success']]
             if failed_results:
-                f.write("\n## 测试失败的目标\n\n")
+                f.write("\n## ❌ 测试失败的目标\n\n")
                 f.write("| 目标 | 错误信息 |\n")
-                f.write("|------|----------|\n")
+                f.write("|:---|:---|\n")
                 
                 for result in failed_results:
                     target = result['original']
-                    if len(target) > 40:
-                        target = target[:37] + "..."
                     error = result.get('error', '未知错误')
-                    f.write(f"| {target} | {error} |\n")
+                    f.write(f"| `{target}` | {error} |\n")
 
             # 流媒体网站测试结果（如果启用）
             if self.enable_streaming_test and any('streaming_summary' in r for r in sorted_results):
@@ -1673,13 +1717,13 @@ class AdvancedIPTester:
         sorted_results = self.sort_results('overall')
         successful_results = [r for r in sorted_results if r['success']]
         
-        print(f"\n{'='*130}")
-        print(f"前{min(top_n, len(successful_results))}个最佳结果（按综合评分排序）:")
-        print(f"{'='*130}")
+        print(f"\n{self.CLR_BOLD}{self.CLR_C}{'='*130}{self.CLR_0}")
+        print(f"{self.CLR_BOLD}{self.CLR_C}前{min(top_n, len(successful_results))}个最佳结果（按综合评分排序）:{self.CLR_0}")
+        print(f"{self.CLR_BOLD}{self.CLR_C}{'='*130}{self.CLR_0}")
         
         headers = ["目标", "延迟", "丢包率", "抖动", "TCP", "综合", "流媒体", "游戏", "通话"]
-        print(f"{headers[0]:<30} {headers[1]:<8} {headers[2]:<10} {headers[3]:<8} "
-              f"{headers[4]:<8} {headers[5]:<8} {headers[6]:<10} {headers[7]:<8} {headers[8]:<8}")
+        print(f"{self.CLR_BOLD}{headers[0]:<30} {headers[1]:<8} {headers[2]:<10} {headers[3]:<8} "
+              f"{headers[4]:<8} {headers[5]:<8} {headers[6]:<10} {headers[7]:<8} {headers[8]:<8}{self.CLR_0}")
         print(f"{'-'*130}")
         
         for i, result in enumerate(successful_results[:top_n]):
@@ -1693,13 +1737,17 @@ class AdvancedIPTester:
                 tcp = f"{result['tcp'].get('connect_time', 0):.1f}"
             
             scores = result['scores']
-            overall = str(scores.get('overall', 0))
-            streaming = str(scores.get('streaming', 0))
-            gaming = str(scores.get('gaming', 0))
-            rtc = str(scores.get('rtc', 0))
+            overall = scores.get('overall', 0)
+            streaming = scores.get('streaming', 0)
+            gaming = scores.get('gaming', 0)
+            rtc = scores.get('rtc', 0)
             
-            print(f"{target:<30} {delay:<8} {loss:<10} {jitter:<8} "
-                  f"{tcp:<8} {overall:<8} {streaming:<10} {gaming:<8} {rtc:<8}")
+            # 使用颜色
+            color = self._get_score_color(overall)
+            emoji = self._get_score_emoji(overall)
+            
+            print(f"{color}{target:<30} {delay:<8} {loss:<10} {jitter:<8} "
+                  f"{tcp:<8} {overall:<8} {streaming:<10} {gaming:<8} {rtc:<8} {emoji}{self.CLR_0}")
 
 
 def read_targets_from_file(filename: str = 'ip.txt') -> List[str]:
