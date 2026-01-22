@@ -15,6 +15,7 @@ import threading
 import urllib.request
 import json
 import ssl
+from urllib.parse import urlparse
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -63,6 +64,7 @@ class AdvancedIPTester:
         self.enable_http_test = self.config.get('enable_http_test', True)
         self.http_test_url = self.config.get('http_test_url', HTTP_TEST_URLS[0])
         self.http_timeout = self.config.get('http_timeout', 10)
+        self.score_include_http = self.config.get('score_include_http', True)
         self.enable_stability_test = self.config.get('enable_stability_test', True)
         self.stability_attempts = self.config.get('stability_attempts', 10)
 
@@ -309,39 +311,20 @@ class AdvancedIPTester:
             'success': False,
             'tls_handshake_time': None,  # TLS握手时间（ms）
             'ttfb': None,  # 首字节时间（ms）
-            'total_time': None,  # 总响应时间（ms）
+            'total_time': None,  # 响应头接收完成时间（ms）
             'status_code': None,
             'error': None
         }
 
         try:
-            start_time = time.time()
-
-            # 创建HTTP请求
-            req = urllib.request.Request(
-                self.http_test_url,
-                headers={'User-Agent': 'Mozilla/5.0'}
+            # Cloudflare优选IP场景：连接到目标IP，但用URL里的域名做SNI/Host，测"通过该IP访问站点"的TTFB。
+            metrics = self._http_request_via_ip(
+                ip=target,
+                port=port,
+                url=self.http_test_url,
+                timeout=self.http_timeout,
             )
-
-            # 创建SSL上下文（忽略证书验证以提高速度）
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-
-            # 发送请求
-            with urllib.request.urlopen(req, timeout=self.http_timeout, context=ctx) as response:
-                # 记录首字节时间
-                ttfb_time = time.time()
-                result['ttfb'] = (ttfb_time - start_time) * 1000
-
-                # 读取响应
-                response.read()
-
-                # 记录总时间
-                end_time = time.time()
-                result['total_time'] = (end_time - start_time) * 1000
-                result['status_code'] = response.status
-                result['success'] = True
+            result.update(metrics)
 
         except urllib.error.HTTPError as e:
             result['status_code'] = e.code
@@ -355,12 +338,130 @@ class AdvancedIPTester:
 
         return result
 
+    def _http_request_via_ip(self, ip: str, port: int, url: str, timeout: int) -> Dict:
+        """
+        通过指定IP建立连接，并以URL中的域名作为SNI/Host发送HTTP请求。
+
+        适用于 Cloudflare 优选 IP：同一个站点(域名)可以通过不同的边缘IP接入，
+        这里强制连到指定IP以评估该IP的应用层延迟（TTFB）。
+
+        注意：这测的是"本机 -> 目标IP(边缘) -> 站点响应"的端到端时间，
+        不是在目标IP上真实发起的"IP到站点"网络路径。
+        """
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or 'https').lower()
+        host = parsed.hostname
+        if not host:
+            return {
+                'success': False,
+                'tls_handshake_time': None,
+                'ttfb': None,
+                'total_time': None,
+                'status_code': None,
+                'error': f'无效URL: {url}'
+            }
+
+        path = parsed.path or '/'
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        # 端口使用目标的端口（来自目标IP:port），URL里若显式指定端口则仅作为参考。
+        connect_port = port or (443 if scheme == 'https' else 80)
+
+        # 仅测响应头，避免下载大内容导致时间不稳定。
+        max_header_bytes = 16 * 1024
+
+        result = {
+            'success': False,
+            'tls_handshake_time': None,
+            'ttfb': None,
+            'total_time': None,
+            'status_code': None,
+            'error': None,
+        }
+
+        sock = None
+        try:
+            start_time = time.time()
+
+            sock = socket.create_connection((ip, connect_port), timeout=timeout)
+            sock.settimeout(timeout)
+
+            tls_start = time.time()
+            if scheme == 'https':
+                # 这里使用URL域名做SNI，证书校验默认开启（更能反映真实可用性）。
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+                tls_end = time.time()
+                result['tls_handshake_time'] = (tls_end - tls_start) * 1000
+            else:
+                tls_end = tls_start
+
+            req = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                "User-Agent: bestip/2.x\r\n"
+                "Accept: */*\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode('ascii', errors='ignore')
+            sock.sendall(req)
+
+            # 读到首字节
+            first_chunk = sock.recv(1)
+            if not first_chunk:
+                result['error'] = "无响应数据"
+                return result
+
+            first_byte_time = time.time()
+            result['ttfb'] = (first_byte_time - start_time) * 1000
+
+            # 继续读取到响应头结束（\r\n\r\n），用于更稳定的"total_time"
+            buf = bytearray(first_chunk)
+            while len(buf) < max_header_bytes and b"\r\n\r\n" not in buf:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+
+            end_time = time.time()
+            result['total_time'] = (end_time - start_time) * 1000
+
+            # 解析状态码
+            try:
+                header_text = bytes(buf).split(b"\r\n", 1)[0].decode('ascii', errors='ignore')
+                # e.g. HTTP/1.1 200 OK
+                parts = header_text.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    result['status_code'] = int(parts[1])
+            except Exception:
+                pass
+
+            result['success'] = True
+            return result
+
+        except ssl.SSLError as e:
+            result['error'] = f"TLS错误: {e}"
+            return result
+        except socket.timeout:
+            result['error'] = "连接超时"
+            return result
+        except Exception as e:
+            result['error'] = str(e)
+            return result
+        finally:
+            try:
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+
     def test_streaming_sites(self, target: str, port: int = 443) -> Dict:
         """
         测试流媒体网站连通性和延迟
 
-        测试指定代理节点对多个流媒体网站的访问能力。
-        注意：当前实现为直连测试，不经过代理。
+        Cloudflare优选IP场景：对每个站点URL，连接到目标IP，但使用站点域名做SNI/Host，
+        测量"通过该IP访问该站点"的TTFB/响应头时间。
 
         Args:
             target: 目标主机（代理节点IP或域名）
@@ -390,7 +491,7 @@ class AdvancedIPTester:
 
             with ThreadPoolExecutor(max_workers=min(4, len(self.streaming_sites))) as executor:
                 future_to_site = {
-                    executor.submit(self._test_single_streaming_site, site): site
+                    executor.submit(self._test_single_streaming_site, target, port, site): site
                     for site in self.streaming_sites
                 }
 
@@ -410,7 +511,7 @@ class AdvancedIPTester:
         else:
             # 串行测试
             for site in self.streaming_sites:
-                results['sites'][site] = self._test_single_streaming_site(site)
+                results['sites'][site] = self._test_single_streaming_site(target, port, site)
 
         # 计算摘要统计
         successful_sites = [r for r in results['sites'].values() if r['success']]
@@ -427,12 +528,14 @@ class AdvancedIPTester:
 
         return results
 
-    def _test_single_streaming_site(self, site_url: str) -> Dict:
+    def _test_single_streaming_site(self, target: str, port: int, site_url: str) -> Dict:
         """
         测试单个流媒体网站
 
         Args:
-            site_url: 网站URL
+            target: 目标IP/域名（Cloudflare边缘IP）
+            port: 目标端口
+            site_url: 网站URL（用于提取Host/SNI与路径）
 
         Returns:
             单个网站的测试结果
@@ -446,54 +549,25 @@ class AdvancedIPTester:
         }
 
         try:
-            start_time = time.time()
-
-            # 创建HTTP请求
-            req = urllib.request.Request(
-                site_url,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1'
-                }
+            metrics = self._http_request_via_ip(
+                ip=self._clean_target(target),
+                port=port,
+                url=site_url,
+                timeout=self.streaming_timeout,
             )
+            result['success'] = metrics.get('success', False)
+            result['ttfb'] = metrics.get('ttfb')
+            result['total_time'] = metrics.get('total_time')
+            result['status_code'] = metrics.get('status_code')
+            result['error'] = metrics.get('error')
 
-            # 创建SSL上下文
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-
-            # 发送请求
-            with urllib.request.urlopen(req, timeout=self.streaming_timeout, context=ctx) as response:
-                # 记录首字节时间
-                ttfb_time = time.time()
-                result['ttfb'] = (ttfb_time - start_time) * 1000
-
-                # 读取少量数据（不需要完整响应）
-                response.read(1024)
-
-                # 记录总时间
-                end_time = time.time()
-                result['total_time'] = (end_time - start_time) * 1000
-                result['status_code'] = response.status
+            # 部分站点会返回403/302等，但对"可达"来说仍算成功
+            if not result['success'] and result['status_code'] in [200, 301, 302, 403]:
                 result['success'] = True
-
-        except urllib.error.HTTPError as e:
-            result['status_code'] = e.code
-            if e.code in [200, 301, 302, 403]:  # 某些状态码也算可访问
-                result['success'] = True
-                result['error'] = f'HTTP {e.code}'
-            else:
-                result['error'] = f'HTTP错误: {e.code}'
-        except urllib.error.URLError as e:
-            result['error'] = f'URL错误: {str(e.reason)}'
-        except socket.timeout:
-            result['error'] = '连接超时'
+                if not result['error']:
+                    result['error'] = f"HTTP {result['status_code']}"
         except Exception as e:
-            result['error'] = f'未知错误: {str(e)}'
+            result['error'] = f"测试异常: {str(e)}"
 
         return result
 
@@ -806,7 +880,10 @@ class AdvancedIPTester:
             # 5. 计算评分
             if ProxyScoreCalculator:
                 # 使用新的代理评分算法
-                scores = ProxyScoreCalculator.calculate_proxy_score(result)
+                scoring_input = dict(result)
+                if not self.score_include_http:
+                    scoring_input['http'] = {}
+                scores = ProxyScoreCalculator.calculate_proxy_score(scoring_input)
             else:
                 # 使用原有评分算法（向后兼容）
                 scores = self.calculate_quality_score(ping_result, tcp_result)
@@ -918,18 +995,16 @@ class AdvancedIPTester:
         Returns:
             测试结果
         """
-        # 使用锁确保输出不混乱
+        # 只保护输出，不要把整个测试流程锁住（否则并发会退化为串行）
         with self.print_lock:
-            # 显示进度
-            print(f"[{idx+1}/{total}] ", end='', flush=True)
-            
-            # 执行测试（test_target内部的打印也会受到锁保护）
-            result = self.test_target(target)
-            
-            # 如果测试失败，显示失败信息
-            if not result['success']:
-                print(f"{target}: 失败 - {result.get('error', '未知错误')}")
-        
+            print(f"[{idx+1}/{total}] 开始: {self._clean_target(target)}")
+
+        result = self.test_target(target)
+
+        if not result['success']:
+            with self.print_lock:
+                print(f"[{idx+1}/{total}] 失败: {self._clean_target(target)} - {result.get('error', '未知错误')}")
+
         return result
 
     def test_targets_two_phase(self, targets: List[str]) -> List[Dict]:
@@ -1043,6 +1118,10 @@ class AdvancedIPTester:
             f.write("=" * 100 + "\n\n")
             
             f.write("排序说明: 按综合评分降序排列（评分越高质量越好）\n\n")
+            if self.enable_streaming_test:
+                f.write("说明: 网站连通性测试（streaming_sites）仅用于展示，不参与综合评分与排序。\n\n")
+            if self.enable_http_test and not self.score_include_http:
+                f.write("说明: HTTP性能测试（http_test_url）仅用于展示，不参与综合评分与排序。\n\n")
             
             # 写入列标题
             headers = [
@@ -1081,7 +1160,7 @@ class AdvancedIPTester:
             # 流媒体测试摘要（如果启用）
             if self.enable_streaming_test and any('streaming_summary' in r for r in sorted_results):
                 f.write("\n" + "=" * 100 + "\n")
-                f.write("流媒体网站可用性测试摘要:\n")
+                f.write("网站连通性测试摘要（仅展示，不参与综合评分与排序）:\n")
                 f.write("-" * 100 + "\n")
 
                 streaming_results = [r for r in sorted_results if r.get('streaming_summary') and r['success']]
@@ -1128,7 +1207,12 @@ class AdvancedIPTester:
             f.write(f"**失败数**: {len([r for r in self.results if not r['success']])}\n\n")
             
             f.write("## 排序说明\n")
-            f.write("按综合评分降序排列（评分越高表示质量越好）\n\n")
+            f.write("按综合评分降序排列（评分越高表示质量越好）。\n")
+            if self.enable_streaming_test:
+                f.write("网站连通性测试（streaming_sites）仅用于展示，不参与综合评分与排序。\n")
+            if self.enable_http_test and not self.score_include_http:
+                f.write("HTTP性能测试（http_test_url）仅用于展示，不参与综合评分与排序。\n")
+            f.write("\n")
             
             f.write("## 最佳结果（按综合评分排序）\n\n")
             
@@ -1193,7 +1277,8 @@ class AdvancedIPTester:
 
             # 流媒体网站测试结果（如果启用）
             if self.enable_streaming_test and any('streaming_summary' in r for r in sorted_results):
-                f.write("\n## 流媒体网站可用性测试\n\n")
+                f.write("\n## 网站连通性测试（仅展示）\n\n")
+                f.write("说明：该部分用于展示每个IP对指定网站的可达性/TTFB，不参与综合评分与排序。\n\n")
 
                 # 提取网站名称（简化显示）
                 site_names = {}
@@ -1224,22 +1309,23 @@ class AdvancedIPTester:
                 f.write('| ' + ' | '.join(header_cols) + ' |\n')
                 f.write('|' + '|'.join(['------' for _ in header_cols]) + '|\n')
 
-                # 按可用数和平均延迟排序
-                streaming_results = [r for r in sorted_results if r.get('streaming_summary')]
-                streaming_results.sort(
-                    key=lambda x: (
-                        -x['streaming_summary']['available_count'],
-                        x['streaming_summary'].get('avg_ttfb', 999999) or 999999
-                    )
-                )
+                # 保持与综合评分排序一致：仅展示，不对网站可用性再排序
+                overall_rank = 0
 
-                # 写入数据行
-                for rank, result in enumerate(streaming_results, 1):
+                # 写入数据行（排名使用综合评分的排名）
+                for result in sorted_results:
+                    if not result.get('success'):
+                        continue
+
+                    overall_rank += 1
+
+                    if not result.get('streaming_summary'):
+                        continue
                     target = result['original']
                     if len(target) > 25:
                         target = target[:22] + "..."
 
-                    row = [str(rank), target]
+                    row = [str(overall_rank), target]
 
                     # 每个网站的测试结果
                     sites_data = result.get('streaming_sites', {})
@@ -1271,10 +1357,11 @@ class AdvancedIPTester:
 
                     f.write('| ' + ' | '.join(row) + ' |\n')
 
-                f.write("\n### 流媒体测试说明\n")
+                f.write("\n### 网站连通性说明\n")
                 f.write("- ✅ 表示网站可访问，数字为首字节响应时间（TTFB）\n")
                 f.write("- ❌ 表示网站不可访问或超时\n")
-                f.write("- 可用率 = 可访问网站数 / 总测试网站数\n\n")
+                f.write("- 可用率 = 可访问网站数 / 总测试网站数\n")
+                f.write("- 该部分不参与综合评分与排序\n\n")
 
             # 添加评分说明
             f.write("\n## 评分说明\n\n")
@@ -1776,6 +1863,8 @@ def main():
     print(f"\n测试模式: {config['test_mode']}")
     print(f"  - 快速检测: {'启用' if config['enable_quick_check'] else '禁用'}")
     print(f"  - HTTP测试: {'启用' if config['enable_http_test'] else '禁用'}")
+    if config.get('enable_http_test') and not config.get('score_include_http', True):
+        print("  - HTTP计分: 不参与（仅展示）")
     print(f"  - 稳定性测试: {'启用' if config['enable_stability_test'] else '禁用'}")
     print(f"  - 并发数: 快速检测{config['quick_check_workers']}，深度测试{config['max_workers']}")
     print()

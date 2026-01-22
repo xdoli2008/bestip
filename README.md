@@ -30,8 +30,7 @@
 ### 📝 配置文件改进（NEW）
 - **YAML 格式支持**：更易读、易编辑的配置文件格式
 - **详细注释**：每个参数都有完整的说明
-- **配置优先级**：config.yaml > config.yml > config.json
-- **向后兼容**：继续支持 JSON 格式
+- **配置优先级**：config.yaml > config.yml
 
 ### 🎛️ 可配置输出数量（NEW）
 - **max_results 配置项**：自定义保存的节点数量
@@ -111,15 +110,12 @@
    cdn.2020111.xyz
    cf.090227.xyz
    ```
-2. 确认 `config.json` 中启用了自定义文件功能：
-   ```json
-   {
-     "custom_file_config": {
-       "enable_custom_file": true,
-       "merge_custom_with_url": true,
-       "custom_file_priority": "before_url"
-     }
-   }
+2. 确认 `config.yaml` 中启用了自定义文件功能：
+   ```yaml
+   enable_custom_file: true
+   custom_file_path: data/input/custom.txt
+   merge_custom_with_url: true
+   custom_file_priority: before_url
    ```
 3. 运行 `python main.py`，程序会自动合并自定义列表和URL获取的地址
 
@@ -134,22 +130,23 @@ python ip_tester.py
 
 ### 方法3：自定义配置（高级用法）
 ```python
-from ip_tester_pro import AdvancedIPTester
-from config import load_config
+from src.core.ip_tester_pro import AdvancedIPTester
+from src.config.config import load_config
 
 # 使用预设模式
 config = load_config(test_mode='balanced')  # fast/balanced/thorough
-tester = AdvancedIPTester(config)
+tester = AdvancedIPTester(config=config)
 
 # 或自定义配置
 custom_config = {
     'enable_quick_check': True,
     'enable_http_test': True,
+    'score_include_http': False,  # 仅展示HTTP测试结果，不参与评分
     'enable_stability_test': True,
     'ping_count': 10,
     'max_workers': 10,
 }
-tester = AdvancedIPTester(custom_config)
+tester = AdvancedIPTester(config=custom_config)
 
 # 读取目标并测试
 targets = ['8.8.8.8', '1.1.1.1', 'example.com']
@@ -188,7 +185,7 @@ www.google.com
    - 默认输入源
    - 适用于通用的IP/域名列表
 
-2. **URL远程获取** (通过 `config.json` 配置)
+2. **URL远程获取** (通过 `config.yaml` 配置)
    - 从远程URL获取IP列表
    - 支持多个URL并发获取
    - 自动重试和错误处理
@@ -274,6 +271,11 @@ URL获取（如果启用）
    enable_url_fetch: false
    url_sources:
      - https://raw.githubusercontent.com/user/repo/main/list.txt
+
+   # HTTP 性能测试（Cloudflare 优选 IP 场景常用：仅展示不计分）
+   enable_http_test: true
+   score_include_http: false
+   http_test_url: https://cp.cloudflare.com/generate_204
 
    # 测试模式：fast / balanced / thorough
    test_mode: balanced

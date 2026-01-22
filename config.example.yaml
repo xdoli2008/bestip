@@ -142,6 +142,11 @@ test_mode: balanced
 # 推荐：true（对于代理节点评估很重要）
 enable_http_test: true
 
+# HTTP 测试结果是否参与综合评分
+# Cloudflare 优选 IP 场景常用：false（只用于展示）
+# 代理节点场景常用：true（参与评分）
+score_include_http: true
+
 # HTTP 测试 URL
 # 说明：用于测试 HTTP 响应速度的 URL
 # 推荐值：

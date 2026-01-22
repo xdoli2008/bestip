@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     'enable_http_test': True,      # 启用HTTP性能测试
     'http_test_url': 'https://cp.cloudflare.com/generate_204',  # HTTP测试URL
     'http_timeout': 10,            # HTTP测试超时（秒）
+    'score_include_http': True,    # HTTP测试结果是否参与综合评分（默认参与）
     'enable_download_test': False, # 启用下载速度测试
     'download_test_size_kb': 100,  # 下载测试文件大小（KB）
     'download_timeout': 10,        # 下载测试超时（秒）
@@ -94,6 +95,7 @@ TEST_MODES = {
         'enable_multi_round': False,
         'test_rounds': 1,
         'enable_http_test': True,
+        'score_include_http': True,
         'enable_download_test': False,
         'enable_stability_test': False,
         'ping_count': 5,
@@ -105,6 +107,7 @@ TEST_MODES = {
         'enable_multi_round': True,
         'test_rounds': 2,
         'enable_http_test': True,
+        'score_include_http': True,
         'enable_download_test': False,
         'enable_stability_test': True,
         'ping_count': 10,
@@ -117,6 +120,7 @@ TEST_MODES = {
         'enable_multi_round': True,
         'test_rounds': 3,
         'enable_http_test': True,
+        'score_include_http': True,
         'enable_download_test': True,
         'enable_stability_test': True,
         'ping_count': 15,
