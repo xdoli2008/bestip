@@ -1379,7 +1379,7 @@ def read_targets_from_file(filename: str = 'ip.txt') -> List[str]:
 
 def load_targets(config: Dict) -> List[str]:
     """
-    统一的目标加载函数，支持文件和URL两种方式
+    统一的目标加载函数，支持文件、URL和自定义文件三种方式
 
     Args:
         config: 配置字典
@@ -1388,6 +1388,29 @@ def load_targets(config: Dict) -> List[str]:
         目标列表
     """
     targets = []
+
+    # ========== 新增：自定义文件配置 ==========
+    enable_custom = config.get('enable_custom_file', False)
+    custom_file = config.get('custom_file_path', 'data/input/custom.txt')
+    custom_priority = config.get('custom_file_priority', 'before_url')
+
+    custom_targets = []
+    if enable_custom:
+        print("\n" + "=" * 100)
+        print("读取自定义文件")
+        print("=" * 100)
+
+        custom_targets = read_targets_from_file(custom_file)
+
+        if custom_targets:
+            print(f"\n[OK] 从自定义文件成功读取 {len(custom_targets)} 个目标")
+
+            # 如果优先级是before_url，立即合并
+            if custom_priority == 'before_url':
+                targets.extend(custom_targets)
+        else:
+            print(f"\n[WARN] 自定义文件读取失败或为空")
+    # ========== 自定义文件配置结束 ==========
 
     # 1. 检查是否启用URL获取
     enable_url = config.get('enable_url_fetch', False)
@@ -1409,15 +1432,20 @@ def load_targets(config: Dict) -> List[str]:
         else:
             print("\n[WARN] 从URL获取失败或结果为空")
 
+    # ========== 新增：处理after_url优先级 ==========
+    if enable_custom and custom_priority == 'after_url' and custom_targets:
+        targets.extend(custom_targets)
+    # ========== 优先级处理结束 ==========
+
     # 3. 从文件获取
     file_path = 'data/input/testip.txt'
 
     # 决定是否读取文件
     should_read_file = False
-    if not enable_url:
-        # 未启用URL，使用文件（默认行为）
+    if not enable_url and not enable_custom:
+        # 未启用URL和自定义文件，使用文件（默认行为）
         should_read_file = True
-    elif merge_mode:
+    elif merge_mode or (enable_custom and config.get('merge_custom_with_url', True)):
         # 合并模式，同时读取文件
         should_read_file = True
     elif not targets and fallback_to_file:

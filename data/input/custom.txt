@@ -1,0 +1,22 @@
+# 自定义域名/IP列表
+# 一行一个，支持:
+# - 纯域名/IP
+# - IP:端口格式
+# - 以#开头的注释行
+
+# Cloudflare优选域名
+jp.111000.cc.cd
+cloudflare.182682.xyz
+freeyx.cloudflare88.eu.org
+cdn.2020111.xyz
+cf.090227.xyz
+cf.zhetengsha.eu.org
+cfip.1323123.xyz
+cloudflare-ip.mofashi.ltd
+cf.877771.xyz
+xn--b6gac.eu.org
+cfip.cfcdn.vip
+cfip.xxxxxxxx.tk
+icook.tw
+cloudflare.cfgo.cc
+bestcf.top

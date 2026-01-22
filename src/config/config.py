@@ -55,6 +55,12 @@ DEFAULT_CONFIG = {
     'url_retry_delay': 1,          # 重试间隔（秒）
     'fallback_to_file': True,      # URL全部失败时是否回退到文件读取
     'merge_file_and_url': False,   # 是否合并文件和URL的结果
+
+    # 自定义文件配置（新增）
+    'enable_custom_file': False,          # 是否启用自定义文件（默认关闭）
+    'custom_file_path': 'data/input/custom.txt',  # 自定义文件路径
+    'merge_custom_with_url': True,        # 是否合并自定义文件和URL结果
+    'custom_file_priority': 'before_url', # 自定义文件优先级：'before_url' 或 'after_url'
 }
 
 
@@ -136,6 +142,10 @@ def load_config_from_file(config_file: str = 'config.json') -> Dict:
         # 合并url_config
         if 'url_config' in file_config:
             flat_config.update(file_config['url_config'])
+
+        # 合并custom_file_config
+        if 'custom_file_config' in file_config:
+            flat_config.update(file_config['custom_file_config'])
 
         # 合并test_config
         if 'test_config' in file_config:
