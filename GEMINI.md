@@ -15,7 +15,7 @@
 - `src/config/config.py`: Configuration management.
 - `src/analyzers/`: Contains `proxy_score_calculator.py` and `statistical_analyzer.py` for performance evaluation.
 - `src/utils/url_fetcher.py`: Utility for fetching IP lists from remote URLs.
-- `data/`: Directory for input lists (`testip.txt`, `custom.txt`) and output results (`best.txt`, `ip.txt`, `result_pro.md`).
+- `data/`: Directory for input lists (`testip.txt`, `custom.txt`) and output results (`best.txt`, `ip.txt`, `result_pro.md`, `result_history.json`).
 
 ## Building and Running
 
@@ -41,5 +41,5 @@
 ## Development Conventions
 - **Two-Phase Testing**: Always maintain the separation between quick screening (to discard unreachable nodes) and deep analysis (to measure quality).
 - **Configuration-Driven**: New features should be configurable via the YAML configuration file.
-- **Reporting**: Ensure results are consistently outputted to both `data/output/result_pro.md` (for readability) and `data/output/best.txt` (for programmatic use).
+- **Reporting**: Ensure results are consistently outputted to both `data/output/result_pro.md` (for readability) and `data/output/best.txt` (for programmatic use), with `result_history.json` enabling report comparisons.
 - **Concurrency**: Use the `print_lock` for thread-safe console output during parallel tests.

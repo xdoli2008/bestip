@@ -45,5 +45,5 @@
   - How to reproduce (commands + sample input path).
   - Any config keys added/changed (update `config.example.yaml` when applicable).
 - Avoid committing personal URLs/secrets in `config.yaml`; prefer examples in
-  `config.example.yaml`. Avoid committing generated outputs in `data/output/`
-  unless intentionally updating sample artifacts.
+  `config.example.yaml`. For this repo, `data/output/` is intentionally
+  committed as real deliverables, so keep them updated when logic changes.

@@ -323,10 +323,14 @@ scoring_mode: proxy
 # 3. data/output/best.txt
 #    - 干净格式的优质节点列表
 #    - 格式：IP:端口#国家代码
+#    - 国家码优先从输入注释提取（#后、-前），没有则查询地理位置
 #    - 数量由 max_results 控制
 #
 # 4. data/output/ip.txt
 #    - 详细信息的优质节点列表
 #    - 包含地理位置别名
+#
+# 5. data/output/result_history.json
+#    - 历史结果（用于Markdown报告变动对比）
 #
 # ============================================================

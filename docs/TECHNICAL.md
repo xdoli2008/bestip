@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-这是一个高级IP/域名质量测试工具，基于专业网络质量评估算法实现。工具从`ip.txt`读取目标列表，批量测试延迟、丢包率、抖动和TCP性能，并按综合评分排序输出结果。
+这是一个高级IP/域名质量测试工具，基于专业网络质量评估算法实现。工具从`data/input/testip.txt`（或URL/自定义文件）读取目标列表，批量测试延迟、丢包率、抖动和TCP性能，并按综合评分排序输出结果。
 
 ### 核心功能
 - ✅ 批量测试IP/域名质量（支持带端口和注释的目标）
@@ -18,11 +18,15 @@
 ### 文件结构
 ```
 bestip/
-├── ip.txt                    # 输入文件：测试目标列表
-├── ip_tester_pro.py          # 主程序：高级测试器
-├── run_pro.bat               # 启动脚本
-├── result_pro.md             # 输出文件：Markdown格式结果
-├── result_pro.txt            # 输出文件：文本格式结果
+├── main.py                   # 主入口
+├── src/                      # 核心代码
+├── data/
+│   ├── input/testip.txt      # 输入文件：测试目标列表
+│   └── output/               # 输出目录
+│       ├── result_pro.md     # Markdown格式结果（推荐）
+│       ├── result_pro.txt    # 文本格式结果
+│       ├── best.txt          # 干净格式优质节点（IP:端口#地区标识）
+│       └── result_history.json # 历史结果（变动对比）
 └── README.md                 # 使用说明
 ```
 
@@ -33,6 +37,9 @@ class AdvancedIPTester:
     def __init__(self, config: Dict = None)
     def test_targets(self, targets: List[str]) -> List[Dict]
     def test_target(self, target: str) -> Dict
+    def load_history(self, history_file: str = 'data/output/result_history.json')
+    def save_history(self, history_file: str = 'data/output/result_history.json')
+    def compare_with_history(self, history: Dict) -> Dict
     def save_results_md(self, output_file: str = 'result_pro.md')
     def save_results(self, output_file: str = 'result_pro.txt')
     def sort_results(self, sort_by: str = 'overall') -> List[Dict]
@@ -252,6 +259,7 @@ def read_targets_from_file(filename: str = 'ip.txt') -> List[str]:
 ## 输出格式
 
 ### Markdown格式（result_pro.md）
+如果存在 `data/output/result_history.json`，报告会包含变动对比与更新建议。
 - **表格展示**：清晰的Markdown表格
 - **可视化评分**：表情符号表示质量等级
   - 🟢 优秀 (80-100分)

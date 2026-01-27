@@ -57,9 +57,10 @@ config = load_config(test_mode='balanced')
 
 **输入：** `data/input/testip.txt`
 **输出：** `data/output/` 目录
-- `result_pro.md` - 详细报告
-- `best.txt` - 干净格式（IP:端口#国家）
-- `ip.txt` - 详细信息
+- `result_pro.md` - 详细报告（Markdown格式，推荐）
+- `best.txt` - 干净格式（IP:端口#地区标识）
+- `result_pro.txt` - 详细结果（文本格式）
+- `result_history.json` - 历史结果（变动对比）
 
 ## 开发原则
 

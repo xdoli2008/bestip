@@ -9,6 +9,7 @@ import subprocess
 import re
 import time
 import sys
+import os
 import statistics
 import socket
 import threading
@@ -40,6 +41,7 @@ except ImportError:
 
 
 class AdvancedIPTester:
+    HISTORY_VERSION = 1
     def __init__(self, config: Dict = None):
         """
         初始化高级测试器
@@ -1212,20 +1214,486 @@ class AdvancedIPTester:
                         f.write(f"{target:<40} {error}\n")
         
         print(f"详细结果已保存到: {output_file}")
+
+    def _make_history_key(self, target: Optional[str], original: Optional[str]) -> str:
+        if isinstance(original, str):
+            base = original.split('#', 1)[0].strip()
+            if base:
+                return base
+        if isinstance(target, str):
+            return target.strip()
+        return ""
+
+    def _coerce_number(self, value) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                return None
+        return None
+
+    def _format_number(self, value: Optional[float], precision: int = 1, suffix: str = "") -> str:
+        if value is None:
+            return "N/A"
+        return f"{value:.{precision}f}{suffix}"
+
+    def _format_score(self, value: Optional[float], bold: bool = False) -> str:
+        if value is None:
+            return "N/A"
+        formatted = f"{value:.0f}"
+        return f"**{formatted}**" if bold else formatted
+
+    def _escape_md_cell(self, value: str) -> str:
+        """
+        转义 Markdown 表格单元格内容，避免破坏表格结构
+
+        Args:
+            value: 要转义的字符串
+
+        Returns:
+            转义后的字符串（安全用于 Markdown 表格）
+        """
+        if value is None:
+            return ""
+        text = str(value).replace("\n", " ").replace("\r", " ")
+        # 替换反引号为单引号，避免行内代码块冲突
+        text = text.replace("`", "'")
+        # 转义管道符
+        text = text.replace("|", "\\|")
+        return text
+
+    def _extract_location_tag_from_comment(self, original: Optional[str]) -> Optional[str]:
+        """
+        从原始字符串的注释中提取地区标识（可能是国家码、地区名或其他标签）
+
+        Args:
+            original: 原始字符串，格式如 "IP:port#地区-其他信息"
+
+        Returns:
+            地区标识字符串，如果无法提取则返回 None
+        """
+        if not isinstance(original, str) or "#" not in original:
+            return None
+        comment_part = original.split("#", 1)[1].strip()
+        if not comment_part:
+            return None
+        # 提取 "-" 之前的部分作为地区标识
+        candidate = comment_part.split("-", 1)[0].strip()
+        if not candidate:
+            return None
+        # 过滤广告性质的标签（包含频道、@、加入等关键词）
+        if any(token in candidate for token in ("频道", "@", "加入")):
+            return None
+        return candidate
+
+    def _resolve_location_tag(self, target: Optional[str], original: Optional[str] = None) -> str:
+        """
+        解析地区标识：优先从注释提取，否则使用地理位置查询
+
+        Args:
+            target: 清理后的目标（IP或域名）
+            original: 原始输入字符串
+
+        Returns:
+            地区标识字符串（注释标签 > 地理查询结果 > 目标本身 > "未知"）
+        """
+        # 优先使用注释中的地区标识
+        comment_tag = self._extract_location_tag_from_comment(original)
+        if comment_tag:
+            return comment_tag
+
+        # 如果没有目标信息，返回"未知"
+        if not target:
+            return "未知"
+
+        # 尝试地理位置查询
+        country_code, _ = self.get_country_from_ip(target)
+        if country_code and country_code not in ("未知", "Unknown"):
+            return country_code
+
+        # 如果目标包含字母（域名），返回目标本身作为标识
+        if any(c.isalpha() for c in str(target)):
+            return str(target)
+
+        # 否则返回目标本身（IP地址）
+        return str(target)
     
+    def load_history(self, history_file: str = 'data/output/result_history.json') -> Optional[Dict]:
+        """
+        加载历史测试结果
+
+        Args:
+            history_file: 历史文件路径
+
+        Returns:
+            历史结果字典，如果文件不存在则返回None
+        """
+        if not os.path.exists(history_file):
+            return None
+
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"警告: 读取历史文件失败: {e}")
+            return None
+
+        if not isinstance(data, dict):
+            print("警告: 历史文件格式异常，已跳过对比")
+            return None
+
+        version = data.get('version', 0)
+        if version not in (0, self.HISTORY_VERSION):
+            print(f"警告: 历史文件版本不兼容({version})，已跳过对比")
+            return None
+
+        results = data.get('results', [])
+        if not isinstance(results, list):
+            print("警告: 历史文件结构异常，已跳过对比")
+            return None
+
+        return data
+
+    def save_history(self, history_file: str = 'data/output/result_history.json'):
+        """
+        保存当前测试结果到历史文件
+
+        Args:
+            history_file: 历史文件路径
+        """
+        sorted_results = self.sort_results('overall')
+        successful_results = [r for r in sorted_results if r['success']]
+
+        # 提取关键信息
+        history_data = {
+            'version': self.HISTORY_VERSION,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_count': len(self.results),
+            'success_count': len(successful_results),
+            'results': []
+        }
+
+        for rank, result in enumerate(successful_results, 1):
+            key = self._make_history_key(result.get('target'), result.get('original'))
+            history_data['results'].append({
+                'rank': rank,
+                'key': key,
+                'target': result.get('target'),
+                'original': result.get('original'),
+                'score': self._coerce_number(result.get('scores', {}).get('overall')),
+                'delay': self._coerce_number(result.get('ping', {}).get('avg_delay')),
+                'loss_rate': self._coerce_number(result.get('ping', {}).get('loss_rate')),
+                'jitter': self._coerce_number(result.get('ping', {}).get('jitter'))
+            })
+
+        try:
+            history_dir = os.path.dirname(history_file)
+            if history_dir:
+                os.makedirs(history_dir, exist_ok=True)
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"警告: 保存历史文件失败: {e}")
+
+    def compare_with_history(self, history: Dict) -> Dict:
+        """
+        对比当前结果与历史结果
+
+        Args:
+            history: 历史结果字典
+
+        Returns:
+            对比结果字典
+        """
+        sorted_results = self.sort_results('overall')
+        successful_results = [r for r in sorted_results if r['success']]
+
+        # 构建当前结果映射（支持同一 key 多个目标的情况）
+        current_map = {}
+        for rank, result in enumerate(successful_results, 1):
+            key = self._make_history_key(result.get('target'), result.get('original'))
+            if not key:
+                continue
+
+            # 确保 original 始终为字符串（避免后续处理时出错）
+            original = result.get('original')
+            if original is None:
+                original = result.get('target', '')
+
+            # 如果 key 已存在，保留第一个（排名更高的）
+            if key not in current_map:
+                current_map[key] = {
+                    'rank': rank,
+                    'score': self._coerce_number(result.get('scores', {}).get('overall')),
+                    'delay': self._coerce_number(result.get('ping', {}).get('avg_delay')),
+                    'original': str(original)  # 确保为字符串
+                }
+
+        # 构建历史结果映射（增强兼容性）
+        history_map = {}
+        history_results = history.get('results', [])
+        if not isinstance(history_results, list):
+            history_results = []
+        for item in history_results:
+            if not isinstance(item, dict):
+                continue
+            target = item.get('target')
+            original = item.get('original')
+            key = item.get('key') or self._make_history_key(target, original)
+            if not key:
+                continue
+
+            # 宽松转换 rank（兼容字符串格式的历史数据）
+            rank_value = item.get('rank')
+            try:
+                rank = int(rank_value) if rank_value is not None else None
+            except (ValueError, TypeError):
+                continue  # 无效的 rank，跳过该条记录
+
+            if rank is None:
+                continue
+
+            # 确保 original 为字符串
+            if original is None:
+                original = target or ''
+
+            history_map[key] = {
+                'rank': rank,
+                'score': self._coerce_number(item.get('score')),
+                'delay': self._coerce_number(item.get('delay')),
+                'original': str(original)  # 确保为字符串
+            }
+
+        # 分析变化
+        current_keys = set(current_map.keys())
+        history_keys = set(history_map.keys())
+
+        # 新增的IP
+        new_ips = current_keys - history_keys
+        # 移除的IP
+        removed_ips = history_keys - current_keys
+        # 共同的IP
+        common_ips = current_keys & history_keys
+
+        # 排名变化
+        rank_changes = []
+        score_changes = []
+
+        for key in common_ips:
+            current = current_map[key]
+            history_item = history_map[key]
+
+            rank_diff = history_item['rank'] - current['rank']  # 正数表示排名上升
+            score_diff = None
+            if current['score'] is not None and history_item['score'] is not None:
+                score_diff = current['score'] - history_item['score']
+
+            if rank_diff != 0:
+                rank_changes.append({
+                    'target': key,
+                    'original': current['original'],
+                    'old_rank': history_item['rank'],
+                    'new_rank': current['rank'],
+                    'rank_diff': rank_diff,
+                    'score': current['score']
+                })
+
+            if score_diff is not None and abs(score_diff) >= 5:  # 评分变化超过5分才记录
+                score_changes.append({
+                    'target': key,
+                    'original': current['original'],
+                    'old_score': history_item['score'],
+                    'new_score': current['score'],
+                    'score_diff': score_diff
+                })
+
+        # 按排名变化幅度排序
+        rank_changes.sort(key=lambda x: abs(x['rank_diff']), reverse=True)
+        # 按评分变化幅度排序
+        score_changes.sort(key=lambda x: abs(x['score_diff']), reverse=True)
+
+        # 计算整体趋势
+        score_diffs = [
+            current_map[k]['score'] - history_map[k]['score']
+            for k in common_ips
+            if current_map[k]['score'] is not None and history_map[k]['score'] is not None
+        ]
+        avg_score_change = sum(score_diffs) / len(score_diffs) if score_diffs else 0
+
+        return {
+            'has_history': True,
+            'history_time': history.get('timestamp', '未知'),
+            'new_ips': sorted([(key, current_map[key]) for key in new_ips],
+                            key=lambda x: x[1]['rank']),
+            'removed_ips': sorted([(key, history_map[key]) for key in removed_ips],
+                                key=lambda x: x[1]['rank']),
+            'rank_changes': rank_changes[:10],  # 只显示前10个变化
+            'score_changes': score_changes[:10],
+            'avg_score_change': avg_score_change,
+            'total_current': len(successful_results),
+            'total_history': len(history_results)
+        }
+
     def save_results_md(self, output_file: str = 'result_pro.md'):
         """
         保存结果到markdown格式文件
-        
+
         Args:
             output_file: 输出文件名
         """
         sorted_results = self.sort_results('overall')
-        
+
+        # 加载历史结果并进行对比
+        history = self.load_history()
+        comparison = None
+        if history:
+            comparison = self.compare_with_history(history)
+
+        output_dir = os.path.dirname(output_file)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
         with open(output_file, 'w', encoding='utf-8') as f:
             # 写入markdown标题
             f.write(f"# 🚀 IP/域名质量测试报告\n\n")
             f.write(f"📅 **生成时间**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n")
+
+            # 如果有历史记录，显示变动对比
+            if comparison and comparison['has_history']:
+                f.write("## 📊 变动对比分析\n\n")
+                f.write(f"> 📅 **上次测试时间**: `{comparison['history_time']}`\n\n")
+
+                # 整体趋势
+                avg_change = comparison['avg_score_change']
+                if avg_change > 2:
+                    trend_emoji = "📈"
+                    trend_text = f"整体质量提升 (+{avg_change:.1f}分)"
+                    trend_color = "🟢"
+                elif avg_change < -2:
+                    trend_emoji = "📉"
+                    trend_text = f"整体质量下降 ({avg_change:.1f}分)"
+                    trend_color = "🔴"
+                else:
+                    trend_emoji = "➡️"
+                    trend_text = f"整体质量稳定 ({avg_change:+.1f}分)"
+                    trend_color = "🟡"
+
+                f.write(f"### {trend_emoji} 质量趋势\n\n")
+                f.write(f"{trend_color} **{trend_text}**\n\n")
+
+                # 新增IP
+                if comparison['new_ips']:
+                    f.write(f"### 🆕 新增优质节点 ({len(comparison['new_ips'])}个)\n\n")
+                    f.write("| 排名 | IP地址 | 评分 | 延迟 |\n")
+                    f.write("|:---:|:---|:---:|:---:|\n")
+                    for ip, info in comparison['new_ips'][:5]:  # 只显示前5个
+                        # 确保 original 为字符串并安全截断
+                        original = str(info.get('original', ip))
+                        if len(original) > 30:
+                            original = original[:27] + "..."
+                        original = self._escape_md_cell(original)
+                        score_display = self._format_score(info.get('score'), bold=True)
+                        delay_display = self._format_number(info.get('delay'), precision=1, suffix="ms")
+                        f.write(f"| {info['rank']} | `{original}` | {score_display} | {delay_display} |\n")
+                    if len(comparison['new_ips']) > 5:
+                        f.write(f"\n*还有 {len(comparison['new_ips']) - 5} 个新增节点未显示*\n")
+                    f.write("\n")
+
+                # 移除IP
+                if comparison['removed_ips']:
+                    f.write(f"### ❌ 移除的节点 ({len(comparison['removed_ips'])}个)\n\n")
+                    f.write("| 原排名 | IP地址 | 原评分 |\n")
+                    f.write("|:---:|:---|:---:|\n")
+                    for ip, info in comparison['removed_ips'][:5]:
+                        # 确保 original 为字符串并安全截断
+                        original = str(info.get('original', ip))
+                        if len(original) > 30:
+                            original = original[:27] + "..."
+                        original = self._escape_md_cell(original)
+                        score_display = self._format_score(info.get('score'))
+                        f.write(f"| {info['rank']} | `{original}` | {score_display} |\n")
+                    if len(comparison['removed_ips']) > 5:
+                        f.write(f"\n*还有 {len(comparison['removed_ips']) - 5} 个移除节点未显示*\n")
+                    f.write("\n")
+
+                # 排名变化
+                if comparison['rank_changes']:
+                    f.write(f"### 📊 排名变化 (Top 10)\n\n")
+                    f.write("| IP地址 | 原排名 | 新排名 | 变化 | 当前评分 |\n")
+                    f.write("|:---|:---:|:---:|:---:|:---:|\n")
+                    for change in comparison['rank_changes']:
+                        # 确保 original 为字符串并安全截断
+                        original = str(change.get('original', ''))
+                        if len(original) > 25:
+                            original = original[:22] + "..."
+                        original = self._escape_md_cell(original)
+
+                        if change['rank_diff'] > 0:
+                            change_str = f"⬆️ +{change['rank_diff']}"
+                        else:
+                            change_str = f"⬇️ {change['rank_diff']}"
+
+                        score_display = self._format_score(change.get('score'), bold=True)
+                        f.write(f"| `{original}` | {change['old_rank']} | {change['new_rank']} | {change_str} | {score_display} |\n")
+                    f.write("\n")
+
+                # 评分变化
+                if comparison['score_changes']:
+                    f.write(f"### 📈 评分变化 (变化≥5分)\n\n")
+                    f.write("| IP地址 | 原评分 | 新评分 | 变化 |\n")
+                    f.write("|:---|:---:|:---:|:---:|\n")
+                    for change in comparison['score_changes']:
+                        # 确保 original 为字符串并安全截断
+                        original = str(change.get('original', ''))
+                        if len(original) > 30:
+                            original = original[:27] + "..."
+                        original = self._escape_md_cell(original)
+
+                        score_diff = change.get('score_diff')
+                        if score_diff is None:
+                            change_str = "N/A"
+                        elif score_diff > 0:
+                            change_str = f"🟢 +{score_diff:.0f}"
+                        else:
+                            change_str = f"🔴 {score_diff:.0f}"
+
+                        old_score = self._format_score(change.get('old_score'))
+                        new_score = self._format_score(change.get('new_score'))
+                        f.write(f"| `{original}` | {old_score} | {new_score} | {change_str} |\n")
+                    f.write("\n")
+
+                # 决策建议
+                f.write("### 💡 更新建议\n\n")
+
+                new_count = len(comparison['new_ips'])
+                removed_count = len(comparison['removed_ips'])
+                significant_changes = len([c for c in comparison['rank_changes'] if abs(c['rank_diff']) >= 3])
+
+                if new_count >= 3 or removed_count >= 3 or significant_changes >= 3:
+                    f.write("🔴 **建议立即更新代理配置**\n\n")
+                    reasons = []
+                    if new_count >= 3:
+                        reasons.append(f"- 新增了 {new_count} 个优质节点")
+                    if removed_count >= 3:
+                        reasons.append(f"- 有 {removed_count} 个节点已失效")
+                    if significant_changes >= 3:
+                        reasons.append(f"- 有 {significant_changes} 个节点排名显著变化")
+                    f.write("\n".join(reasons) + "\n\n")
+                elif new_count > 0 or removed_count > 0:
+                    f.write("🟡 **建议考虑更新代理配置**\n\n")
+                    f.write(f"- 有少量节点变动（新增{new_count}个，移除{removed_count}个）\n\n")
+                else:
+                    f.write("🟢 **当前配置稳定，暂无需更新**\n\n")
+                    f.write("- 节点列表无变化，质量稳定\n\n")
+
+                f.write("---\n\n")
             
             # 摘要卡片
             success_count = len([r for r in self.results if r['success']])
@@ -1256,17 +1724,35 @@ class AdvancedIPTester:
                     target = result['original']
                     if len(target) > 35:
                         target = target[:32] + "..."
+                    target = self._escape_md_cell(target)
                     
-                    delay = f"{result['ping'].get('avg_delay', 0):.1f}ms"
-                    loss = f"{result['ping'].get('loss_rate', 0):.1f}%"
-                    jitter = f"{result['ping'].get('jitter', 0):.1f}ms"
+                    delay = self._format_number(
+                        self._coerce_number(result.get('ping', {}).get('avg_delay')),
+                        precision=1,
+                        suffix="ms"
+                    )
+                    loss = self._format_number(
+                        self._coerce_number(result.get('ping', {}).get('loss_rate')),
+                        precision=1,
+                        suffix="%"
+                    )
+                    jitter = self._format_number(
+                        self._coerce_number(result.get('ping', {}).get('jitter')),
+                        precision=1,
+                        suffix="ms"
+                    )
                     
                     tcp_time = "N/A"
-                    if result['tcp'].get('success'):
-                        tcp_time = f"{result['tcp'].get('connect_time', 0):.1f}ms"
+                    if result.get('tcp', {}).get('success'):
+                        tcp_time = self._format_number(
+                            self._coerce_number(result.get('tcp', {}).get('connect_time')),
+                            precision=1,
+                            suffix="ms"
+                        )
                     
-                    scores = result['scores']
-                    overall = scores.get('overall', 0)
+                    scores = result.get('scores', {})
+                    overall = self._coerce_number(scores.get('overall'))
+                    overall_value = overall if overall is not None else 0
                     
                     # 评分条
                     def get_progress_bar(score):
@@ -1275,7 +1761,7 @@ class AdvancedIPTester:
                         emoji = self._get_score_emoji(score)
                         return f"`{bar}` **{score}** {emoji}"
                     
-                    overall_display = get_progress_bar(overall)
+                    overall_display = get_progress_bar(overall_value)
                     
                     # 前三名高亮
                     rank_str = str(rank)
@@ -1296,13 +1782,19 @@ class AdvancedIPTester:
                 for result in successful_results:
                     target = result['original']
                     if len(target) > 25: target = target[:22] + "..."
+                    target = self._escape_md_cell(target)
                     
-                    scores = result['scores']
+                    scores = result.get('scores', {})
                     
                     def fmt_score(s):
-                        if s >= 80: return f"**{s}** 🟢"
-                        if s >= 60: return f"{s} 🟡"
-                        return f"{s} 🔴"
+                        value = self._coerce_number(s)
+                        if value is None:
+                            return "N/A"
+                        if value >= 80:
+                            return f"**{value:.0f}** 🟢"
+                        if value >= 60:
+                            return f"{value:.0f} 🟡"
+                        return f"{value:.0f} 🔴"
 
                     f.write(f"| {rank} | `{target}` | {fmt_score(scores.get('overall', 0))} | {fmt_score(scores.get('streaming', 0))} | {fmt_score(scores.get('gaming', 0))} | {fmt_score(scores.get('rtc', 0))} |\n")
                     rank += 1
@@ -1317,6 +1809,8 @@ class AdvancedIPTester:
                 for result in failed_results:
                     target = result['original']
                     error = result.get('error', '未知错误')
+                    target = self._escape_md_cell(target)
+                    error = self._escape_md_cell(error)
                     f.write(f"| `{target}` | {error} |\n")
 
             # 流媒体网站测试结果（如果启用）
@@ -1368,6 +1862,7 @@ class AdvancedIPTester:
                     target = result['original']
                     if len(target) > 25:
                         target = target[:22] + "..."
+                    target = self._escape_md_cell(target)
 
                     row = [str(overall_rank), target]
 
@@ -1508,100 +2003,16 @@ class AdvancedIPTester:
                 return True
             except:
                 return False
-    
-    def generate_new_alias(self, result: Dict) -> str:
-        """
-        生成新别名格式: #域名/IP-国家-延迟ms-综合评分
-        
-        示例: #104.19.174.68-US-64ms-97分
-        
-        Args:
-            result: 测试结果字典
-            
-        Returns:
-            新别名字符串
-        """
-        # 获取原始目标（包含域名）或清理后的IP
-        original_target = result['original']
-        clean_target = result['target']
-        
-        # 从原始目标中提取域名/IP部分（移除端口和注释）
-        display_target = clean_target
-        if '#' in original_target:
-            # 如果有注释，尝试提取注释前的IP/域名部分
-            base_part = original_target.split('#')[0].strip()
-            # 如果有端口，提取IP/域名部分
-            if ':' in base_part and base_part.count(':') <= 1:
-                display_target = base_part.split(':')[0].strip()
-            else:
-                display_target = base_part
-        elif ':' in original_target and original_target.count(':') <= 1:
-            # 如果有端口但没有注释
-            display_target = original_target.split(':')[0].strip()
-        
-        # 获取地理位置
-        country_code, _ = self.get_country_from_ip(clean_target)
-        
-        # 获取测试数据
-        delay = int(result['ping']['avg_delay'])
-        score = result['scores']['overall']
-        
-        # 生成别名（包含IP/域名）
-        return f"#{display_target}-{country_code}-{delay}ms-{score}分"
-    
-    def save_top_results(self, output_file: str = 'ip.txt', top_n: int = 15):
-        """
-        保存前N名结果到文件（带新别名）
-        
-        格式: IP:端口#国家-延迟ms-综合评分
-        
-        Args:
-            output_file: 输出文件名
-            top_n: 保存前N个结果
-        """
-        # 按综合评分排序
-        sorted_results = self.sort_results('overall')
-        
-        # 过滤成功的结果，取前N个
-        top_results = [r for r in sorted_results if r['success']][:top_n]
-        
-        if not top_results:
-            print(f"警告: 没有成功的测试结果，{output_file}未更新")
-            return
-        
-        # 写入文件
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for result in top_results:
-                # 获取基础信息
-                original = result['original']
-                clean_target = result['target']
-                
-                # 提取端口（如果有）
-                port = ""
-                if ':' in original and original.count(':') <= 1:
-                    parts = original.split(':')
-                    if len(parts) == 2 and parts[1].split('#')[0].isdigit():
-                        port = f":{parts[1].split('#')[0]}"
-                
-                # 生成新别名
-                new_alias = self.generate_new_alias(result)
-                
-                # 组合新行: IP:端口#新别名
-                new_line = f"{clean_target}{port}{new_alias}\n"
-                f.write(new_line)
-        
-        print(f"[OK] 已将前{len(top_results)}个优质节点保存到 {output_file}")
-        print("\n保存的节点:")
-        for i, result in enumerate(top_results, 1):
-            alias = self.generate_new_alias(result)
-            print(f"  {i}. {result['target']}{alias}")
 
     def save_best_results(self, output_file: str = 'best.txt', top_n: int = 15):
         """
         保存前N名结果到文件（干净格式，无广告）
 
-        格式: IP:端口#国家代码
+        格式: IP:端口#地区标识
         示例: 168.138.165.174:443#SG
+
+        地区标识优先从输入注释提取（#后、-前的部分），
+        否则使用地理位置查询结果
 
         Args:
             output_file: 输出文件名
@@ -1633,37 +2044,11 @@ class AdvancedIPTester:
                         if port_part.isdigit():
                             port = f":{port_part}"
 
-                # 从原始输入中提取国家代码
-                country_code = None
-                if '#' in original:
-                    # 格式: IP:port#Country-频道@kejiland00
-                    # 提取#后面的部分
-                    comment_part = original.split('#')[1]
-                    # 提取国家代码（在-之前）
-                    if '-' in comment_part:
-                        country_code = comment_part.split('-')[0].strip()
-                    else:
-                        # 如果没有-，可能是广告信息，忽略
-                        if '频道' in comment_part or '@' in comment_part or '加入' in comment_part:
-                            country_code = None
-                        else:
-                            # 否则整个就是国家代码
-                            country_code = comment_part.strip()
+                # 解析地区标识（优先注释，否则地理查询）
+                location_tag = self._resolve_location_tag(clean_target, original)
 
-                # 如果没有从原始输入提取到，尝试查询地理位置
-                if not country_code:
-                    # 判断是否为域名（包含字母）
-                    if any(c.isalpha() for c in clean_target):
-                        # 域名直接使用自身作为标识
-                        country_code = clean_target
-                    else:
-                        # IP地址才查询地理位置
-                        country_code, _ = self.get_country_from_ip(clean_target)
-                        if not country_code:
-                            country_code = clean_target  # 如果查询失败，使用IP本身
-
-                # 组合新行: IP:端口#国家代码
-                new_line = f"{clean_target}{port}#{country_code}\n"
+                # 组合新行: IP:端口#地区标识
+                new_line = f"{clean_target}{port}#{location_tag}\n"
                 f.write(new_line)
 
         print(f"[OK] 已将前{len(top_results)}个优质节点保存到 {output_file}（干净格式）")
@@ -1681,31 +2066,10 @@ class AdvancedIPTester:
                     if port_part.isdigit():
                         port = f":{port_part}"
 
-            # 提取国家代码（与保存逻辑一致）
-            country_code = None
-            if '#' in original:
-                comment_part = original.split('#')[1]
-                if '-' in comment_part:
-                    country_code = comment_part.split('-')[0].strip()
-                else:
-                    # 如果没有-，可能是广告信息，忽略
-                    if '频道' in comment_part or '@' in comment_part or '加入' in comment_part:
-                        country_code = None
-                    else:
-                        country_code = comment_part.strip()
+            # 提取地区标识（与保存逻辑一致）
+            location_tag = self._resolve_location_tag(clean_target, original)
 
-            if not country_code:
-                # 判断是否为域名（包含字母）
-                if any(c.isalpha() for c in clean_target):
-                    # 域名直接使用自身作为标识
-                    country_code = clean_target
-                else:
-                    # IP地址才查询地理位置
-                    country_code, _ = self.get_country_from_ip(clean_target)
-                    if not country_code:
-                        country_code = clean_target
-
-            print(f"  {i}. {clean_target}{port}#{country_code}")
+            print(f"  {i}. {clean_target}{port}#{location_tag}")
 
     def display_summary(self, top_n: int = 20):
         """
@@ -1933,30 +2297,31 @@ def main():
     # 6. 保存完整结果（Markdown格式，更易查看）
     tester.save_results_md('data/output/result_pro.md')
 
-    # 7. 同时保存一份txt格式作为备份
+    # 7. 保存历史记录（用于下次对比）
+    print("\n" + "="*60)
+    print("保存历史记录用于下次对比...")
+    print("="*60 + "\n")
+    tester.save_history('data/output/result_history.json')
+    print("[OK] 历史记录已保存到 data/output/result_history.json")
+
+    # 8. 同时保存一份txt格式作为备份
     tester.save_results('data/output/result_pro.txt')
 
-    # 8. 保存前15名到ip.txt（带地理位置别名）
+    # 9. 保存干净格式的best.txt（使用地区标识，注释优先）
     print("\n" + "="*60)
-    print("筛选质量最好的15个节点并生成地理位置别名...")
-    print("="*60 + "\n")
-    tester.save_top_results('data/output/ip.txt', 15)
-
-    # 9. 保存干净格式的best.txt（无广告）
-    print("\n" + "="*60)
-    print("生成干净格式的优质节点列表...")
+    print("生成优质节点列表（干净格式）...")
     print("="*60 + "\n")
     tester.save_best_results('data/output/best.txt', tester.max_results)
 
     print(f"\n测试完成！")
     print(f"主要结果（Markdown格式，推荐）: data/output/result_pro.md")
     print(f"备份结果（文本格式）: data/output/result_pro.txt")
-    print(f"优质节点列表（详细信息）: data/output/ip.txt")
     print(f"优质节点列表（干净格式）: data/output/best.txt")
+    print(f"历史记录（用于对比）: data/output/result_history.json")
     print("结果包含：延迟、丢包率、抖动、TCP连接时间、综合评分、流媒体评分、游戏评分、实时通信评分")
     print("Markdown文件可以用浏览器、Markdown编辑器或支持Markdown的文本编辑器查看")
-    print("ip.txt包含格式: IP:端口#国家-延迟ms-综合评分")
-    print("best.txt包含格式: IP:端口#国家代码（干净格式，无广告）")
+    print("best.txt包含格式: IP:端口#地区标识（注释优先，否则使用地理查询结果）")
+    print("\n💡 提示：下次运行时会自动对比历史记录，显示IP变动情况！")
 
 
 if __name__ == '__main__':
