@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     # 新增配置 - 速度优化
     'enable_quick_check': True,    # 启用快速检测
     'quick_check_workers': 50,     # 快速检测并发数
-    'quick_ping_count': 1,         # 快速检测ping次数
+    'quick_ping_count': 3,         # 快速检测ping次数（从1增加到3，提高可靠性）
     'quick_ping_timeout': 1,       # 快速检测ping超时（秒）
     'quick_tcp_timeout': 2,        # 快速检测TCP超时（秒）
 
@@ -47,15 +47,20 @@ DEFAULT_CONFIG = {
     'http_test_url': 'https://cp.cloudflare.com/generate_204',  # HTTP测试URL
     'http_timeout': 10,            # HTTP测试超时（秒）
     'score_include_http': True,    # HTTP测试结果是否参与综合评分（默认参与）
-    'enable_download_test': False, # 启用下载速度测试
-    'download_test_size_kb': 100,  # 下载测试文件大小（KB）
-    'download_timeout': 10,        # 下载测试超时（秒）
+    'enable_download_test': False, # 启用下载速度测试（默认关闭，可在thorough模式启用）
+    'download_test_duration': 10,  # 下载测试时长（秒）
+    'download_timeout': 15,        # 下载测试超时（秒）
+    'enable_location_test': True,  # 启用地理位置检测（默认启用）
+    'location_timeout': 5,         # 位置检测超时（秒）
     'enable_stability_test': True, # 启用连接稳定性测试
     'stability_attempts': 10,      # 稳定性测试连接次数
 
     # 新增配置 - 评分模式
     'scoring_mode': 'proxy',       # 评分模式：'proxy', 'vpn', 'general'
     'test_mode': 'balanced',       # 测试模式：'fast', 'balanced', 'thorough'
+
+    # 新增配置 - 排序方式
+    'sort_by': 'quality',          # 排序方式：'quality'（质量优先）/'overall'（评分优先）/'delay'/'loss'
 
     # URL获取配置（新增）
     'enable_url_fetch': False,     # 是否启用URL获取（默认关闭，保持向后兼容）

@@ -597,6 +597,265 @@ class AdvancedIPTester:
 
         return result
 
+    def test_download_speed(self, ip: str, port: int = 443, duration: int = 10) -> Dict:
+        """
+        测试实际下载速度
+
+        使用 Cloudflare 的测试 URL 进行真实文件下载测试，真实反映带宽质量。
+        默认使用 HTTPS (443端口) + TLS + SNI。
+
+        Args:
+            ip: IP地址
+            port: 端口（默认443，使用TLS）
+            duration: 测试时长（秒），默认10秒
+
+        Returns:
+            {
+                'success': bool,
+                'speed_mbps': float,      # 下载速度(Mbps)
+                'total_bytes': int,       # 总下载字节数
+                'duration': float,        # 实际测试时长
+                'status_code': int,       # HTTP状态码
+                'error': str              # 错误信息
+            }
+        """
+        result = {
+            'success': False,
+            'speed_mbps': 0.0,
+            'total_bytes': 0,
+            'duration': 0.0,
+            'status_code': None,
+            'error': None
+        }
+
+        clean_ip = self._clean_target(ip)
+
+        # 获取配置的超时时间
+        download_timeout = self.config.get('download_timeout', 15)
+
+        # 校验：确保 timeout >= duration + buffer，避免测速被提前中断
+        if download_timeout < duration + 2:
+            download_timeout = duration + 2
+            self.logger.warning(f"download_timeout 过小，已自动调整为 {download_timeout}秒")
+
+        sock = None
+        try:
+            start_time = time.time()
+
+            # 创建 socket 连接
+            sock = socket.create_connection((clean_ip, port), timeout=download_timeout)
+            sock.settimeout(download_timeout)
+
+            # 如果是443端口，使用TLS+SNI
+            if port == 443:
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname='speed.cloudflare.com')
+
+            # 构造 HTTP 请求
+            req = (
+                f"GET /__down?bytes=100000000 HTTP/1.1\r\n"
+                f"Host: speed.cloudflare.com\r\n"
+                "User-Agent: bestip/2.x\r\n"
+                "Accept: */*\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode('ascii', errors='ignore')
+            sock.sendall(req)
+
+            # 读取并解析 HTTP 响应头
+            header_buf = bytearray()
+            while b"\r\n\r\n" not in header_buf:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    result['error'] = "无响应数据"
+                    return result
+                header_buf.extend(chunk)
+
+            # 解析状态码
+            try:
+                header_text = bytes(header_buf).split(b"\r\n", 1)[0].decode('ascii', errors='ignore')
+                # e.g. HTTP/1.1 200 OK
+                parts = header_text.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    result['status_code'] = int(parts[1])
+            except Exception:
+                pass
+
+            # 校验状态码
+            if result['status_code'] not in [200, 206]:
+                result['error'] = f"HTTP错误: {result['status_code']}"
+                return result
+
+            # 找到响应体开始位置
+            header_end = header_buf.find(b"\r\n\r\n") + 4
+            body_start = header_buf[header_end:]
+
+            # 开始计时和统计下载字节数
+            # 注意：不计入响应头阶段的 body_start，只统计纯下载阶段的字节数
+            total_bytes = 0
+            download_start = time.time()
+
+            # 先处理响应头中已读取的body部分
+            if body_start:
+                total_bytes += len(body_start)
+
+            # 流式下载，避免内存占用过大
+            while True:
+                elapsed = time.time() - download_start
+                if elapsed >= duration:
+                    break
+
+                try:
+                    chunk = sock.recv(8192)  # 8KB 缓冲区
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                except socket.timeout:
+                    break
+
+            end_time = time.time()
+            actual_duration = end_time - download_start
+
+            if actual_duration > 0 and total_bytes > 0:
+                # 计算速度（Mbps = Megabits per second）
+                speed_mbps = (total_bytes * 8 / 1000000) / actual_duration
+                result['success'] = True
+                result['speed_mbps'] = round(speed_mbps, 2)
+                result['total_bytes'] = total_bytes
+                result['duration'] = round(actual_duration, 2)
+            else:
+                result['error'] = "下载数据不足"
+
+        except ssl.SSLError as e:
+            result['error'] = f"TLS错误: {e}"
+        except socket.timeout:
+            result['error'] = "下载超时"
+        except Exception as e:
+            result['error'] = str(e)
+        finally:
+            try:
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+
+        return result
+
+    def get_ip_location(self, ip: str, port: int = 443) -> Dict:
+        """
+        获取IP的地理位置信息
+
+        使用 Cloudflare 的 trace 接口获取 IP 的实际位置信息。
+        默认使用 HTTPS (443端口) + TLS + SNI。
+
+        Args:
+            ip: IP地址
+            port: 端口（默认443，使用TLS）
+
+        Returns:
+            {
+                'success': bool,
+                'colo': str,              # 机场代码（如SG、NL）
+                'country': str,           # 国家代码（如US、CN）
+                'ip': str,                # 实际IP地址
+                'region': str,            # 区域信息
+                'error': str              # 错误信息
+            }
+        """
+        result = {
+            'success': False,
+            'colo': 'Unknown',
+            'country': 'Unknown',
+            'ip': 'Unknown',
+            'region': 'Unknown',
+            'error': None
+        }
+
+        clean_ip = self._clean_target(ip)
+
+        # 获取配置的超时时间
+        location_timeout = self.config.get('location_timeout', 5)
+
+        sock = None
+        try:
+            # 创建 socket 连接
+            sock = socket.create_connection((clean_ip, port), timeout=location_timeout)
+            sock.settimeout(location_timeout)
+
+            # 如果是443端口，使用TLS+SNI
+            if port == 443:
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname='speed.cloudflare.com')
+
+            # 构造 HTTP 请求
+            req = (
+                f"GET /cdn-cgi/trace HTTP/1.1\r\n"
+                f"Host: speed.cloudflare.com\r\n"
+                "User-Agent: bestip/2.x\r\n"
+                "Accept: */*\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode('ascii', errors='ignore')
+            sock.sendall(req)
+
+            # 读取响应
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+
+            # 解析响应
+            response_text = response.decode('utf-8', errors='ignore')
+
+            # 跳过 HTTP 响应头
+            if "\r\n\r\n" in response_text:
+                body = response_text.split("\r\n\r\n", 1)[1]
+            else:
+                body = response_text
+
+            # 解析键值对
+            for line in body.split('\n'):
+                line = line.strip()
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+
+                    if key == 'colo':
+                        result['colo'] = value
+                    elif key == 'loc':
+                        result['country'] = value
+                    elif key == 'ip':
+                        result['ip'] = value
+
+            # 构造区域信息
+            if result['colo'] != 'Unknown' and result['country'] != 'Unknown':
+                result['region'] = f"{result['colo']}/{result['country']}"
+                result['success'] = True
+            elif result['colo'] != 'Unknown':
+                result['region'] = result['colo']
+                result['success'] = True
+            elif result['country'] != 'Unknown':
+                result['region'] = result['country']
+                result['success'] = True
+
+        except ssl.SSLError as e:
+            result['error'] = f"TLS错误: {e}"
+        except socket.timeout:
+            result['error'] = "位置检测超时"
+        except Exception as e:
+            result['error'] = str(e)
+        finally:
+            try:
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+
+        return result
+
     def test_connection_stability(self, target: str, port: int = 443) -> Dict:
         """
         连接稳定性测试
@@ -882,6 +1141,27 @@ class AdvancedIPTester:
                 http_result = self.test_http_performance(result['target'], test_port)
                 result['http'] = http_result
 
+            # 3.5. 地理位置检测（如果启用）
+            enable_location = self.config.get('enable_location_test', True)
+            if enable_location:
+                print(f"检测地理位置: {result['target']}...")
+                # 强制使用443端口，因为 Cloudflare 的服务只在443端口上可用
+                location_result = self.get_ip_location(result['target'], 443)
+                result['location'] = location_result
+                if location_result.get('success'):
+                    print(f"  位置: {location_result['region']}")
+
+            # 3.6. 下载速度测试（如果启用）
+            enable_download = self.config.get('enable_download_test', False)
+            if enable_download:
+                print(f"测试下载速度: {result['target']}...")
+                download_duration = self.config.get('download_test_duration', 10)
+                # 强制使用443端口，因为 Cloudflare 的服务只在443端口上可用
+                download_result = self.test_download_speed(result['target'], 443, download_duration)
+                result['download'] = download_result
+                if download_result.get('success'):
+                    print(f"  下载速度: {download_result['speed_mbps']:.2f} Mbps")
+
             # 4. 流媒体网站测试（如果启用）
             if self.enable_streaming_test:
                 print(f"测试流媒体网站可用性: {result['target']}...")
@@ -1094,24 +1374,34 @@ class AdvancedIPTester:
 
         return self.test_targets(available_targets)
 
-    def sort_results(self, sort_by: str = 'overall') -> List[Dict]:
+    def sort_results(self, sort_by: str = None) -> List[Dict]:
         """
         对结果进行排序
-        
+
         Args:
-            sort_by: 排序依据，可选 'overall', 'streaming', 'gaming', 'rtc', 'delay', 'loss'
-            
+            sort_by: 排序依据，可选 'quality', 'overall', 'streaming', 'gaming', 'rtc', 'delay', 'loss'
+                    如果为None，使用配置中的sort_by
+
         Returns:
             排序后的结果列表
         """
+        # 如果未指定sort_by，使用配置中的值
+        if sort_by is None:
+            sort_by = self.config.get('sort_by', 'overall')
+
+        # 如果是quality排序，使用新的排序算法
+        if sort_by == 'quality':
+            return self.sort_results_by_quality()
+
+        # 否则使用原有的排序算法
         def get_sort_key(result):
             if not result['success']:
                 return (float('inf'), float('inf'), float('inf'))
-            
+
             if sort_by in ['overall', 'streaming', 'gaming', 'rtc']:
                 score = result['scores'].get(sort_by, 0)
                 # 按评分降序排列
-                return (-score, 
+                return (-score,
                         result['ping'].get('loss_rate', 100) or 100,
                         result['ping'].get('avg_delay', 1000) or 1000)
             elif sort_by == 'delay':
@@ -1124,9 +1414,97 @@ class AdvancedIPTester:
                 return (loss, delay)
             else:
                 return (float('inf'), float('inf'), float('inf'))
-        
+
         return sorted(self.results, key=get_sort_key)
-    
+
+    def sort_results_by_quality(self, results: List[Dict] = None) -> List[Dict]:
+        """
+        按质量排序：先按丢包率分组，再按延迟排序，最后按速度排序
+
+        排序策略（避免高丢包低延迟IP排前面）：
+        1. 按丢包率分为4组：perfect(0%), good(<5%), acceptable(<10%), poor(>=10%)
+        2. 每组内按延迟升序排序
+        3. 取前N个候选进行下载速度测试（如果启用且未测试）
+        4. 重新分组并在每组内按延迟和速度排序
+
+        Args:
+            results: 测试结果列表（如果为None，使用self.results）
+
+        Returns:
+            排序后的结果列表
+        """
+        if results is None:
+            results = self.results
+
+        # 过滤出成功的结果
+        success_results = [r for r in results if r.get('success')]
+        failed_results = [r for r in results if not r.get('success')]
+
+        # 按丢包率分组
+        perfect = []    # 0% 丢包
+        good = []       # <5% 丢包
+        acceptable = [] # <10% 丢包
+        poor = []       # >=10% 丢包
+
+        for result in success_results:
+            loss_rate = result.get('ping', {}).get('loss_rate', 100)
+            # 处理None值，避免TypeError
+            if loss_rate is None:
+                loss_rate = 100
+
+            if loss_rate == 0:
+                perfect.append(result)
+            elif loss_rate < 5:
+                good.append(result)
+            elif loss_rate < 10:
+                acceptable.append(result)
+            else:
+                poor.append(result)
+
+        # 定义排序键函数（仅按延迟排序）
+        def get_delay_sort_key(result):
+            delay = result.get('ping', {}).get('avg_delay', 1000)
+            # 处理None值
+            if delay is None:
+                delay = 1000
+            return delay
+
+        # 每组内先按延迟排序
+        perfect.sort(key=get_delay_sort_key)
+        good.sort(key=get_delay_sort_key)
+        acceptable.sort(key=get_delay_sort_key)
+        poor.sort(key=get_delay_sort_key)
+
+        # 合并结果（按质量分组顺序）
+        sorted_by_delay = perfect + good + acceptable + poor
+
+        # 定义最终排序键函数（延迟升序，速度降序）
+        def get_quality_sort_key(result):
+            delay = result.get('ping', {}).get('avg_delay', 1000)
+            # 处理None值
+            if delay is None:
+                delay = 1000
+
+            # 下载速度（如果有）
+            download = result.get('download', {})
+            if download.get('success'):
+                speed = download.get('speed_mbps', 0)
+                if speed is None:
+                    speed = 0
+            else:
+                speed = 0
+            # 返回：延迟升序，速度降序
+            return (delay, -speed)
+
+        # 每组内按延迟和速度排序
+        perfect.sort(key=get_quality_sort_key)
+        good.sort(key=get_quality_sort_key)
+        acceptable.sort(key=get_quality_sort_key)
+        poor.sort(key=get_quality_sort_key)
+
+        # 合并结果：perfect -> good -> acceptable -> poor -> failed
+        return perfect + good + acceptable + poor + failed_results
+
     def save_results(self, output_file: str = 'result_pro.txt'):
         """
         保存结果到文件
@@ -1152,13 +1530,13 @@ class AdvancedIPTester:
             # 写入列标题
             headers = [
                 "排名", "目标", "延迟(ms)", "丢包率(%)", "抖动(ms)",
-                "TCP连接(ms)", "综合评分", "流媒体", "游戏", "实时通信", "状态"
+                "TCP连接(ms)", "下载速度", "地理位置", "综合评分", "流媒体", "游戏", "实时通信", "状态"
             ]
             f.write(f"{headers[0]:<4} {headers[1]:<30} {headers[2]:<10} {headers[3]:<10} "
-                   f"{headers[4]:<10} {headers[5]:<12} {headers[6]:<10} {headers[7]:<10} "
-                   f"{headers[8]:<10} {headers[9]:<10} {headers[10]:<10}\n")
-            f.write("-" * 130 + "\n")
-            
+                   f"{headers[4]:<10} {headers[5]:<12} {headers[6]:<12} {headers[7]:<15} {headers[8]:<10} "
+                   f"{headers[9]:<10} {headers[10]:<10} {headers[11]:<10} {headers[12]:<10}\n")
+            f.write("-" * 160 + "\n")
+
             # 写入成功的结果
             rank = 1
             for result in sorted_results:
@@ -1167,19 +1545,31 @@ class AdvancedIPTester:
                     delay = f"{result['ping'].get('avg_delay', 0):.1f}"
                     loss = f"{result['ping'].get('loss_rate', 0):.1f}"
                     jitter = f"{result['ping'].get('jitter', 0):.1f}"
-                    
+
                     tcp_time = "N/A"
                     if result['tcp'].get('success'):
                         tcp_time = f"{result['tcp'].get('connect_time', 0):.1f}"
-                    
+
+                    # 下载速度
+                    download_speed = "N/A"
+                    download_result = result.get('download', {})
+                    if download_result and download_result.get('success'):
+                        download_speed = f"{download_result.get('speed_mbps', 0):.2f} Mbps"
+
+                    # 地理位置
+                    location = "Unknown"
+                    location_result = result.get('location', {})
+                    if location_result and location_result.get('success'):
+                        location = location_result.get('region', 'Unknown')[:15]
+
                     scores = result['scores']
                     overall = str(scores.get('overall', 0))
                     streaming = str(scores.get('streaming', 0))
                     gaming = str(scores.get('gaming', 0))
                     rtc = str(scores.get('rtc', 0))
-                    
+
                     f.write(f"{rank:<4} {target:<30} {delay:<10} {loss:<10} "
-                           f"{jitter:<10} {tcp_time:<12} {overall:<10} "
+                           f"{jitter:<10} {tcp_time:<12} {download_speed:<12} {location:<15} {overall:<10} "
                            f"{streaming:<10} {gaming:<10} {rtc:<10} 成功\n")
                     rank += 1
 
@@ -1293,18 +1683,35 @@ class AdvancedIPTester:
             return None
         return candidate
 
-    def _resolve_location_tag(self, target: Optional[str], original: Optional[str] = None) -> str:
+    def _resolve_location_tag(self, target: Optional[str], original: Optional[str] = None, result: Optional[Dict] = None) -> str:
         """
-        解析地区标识：优先从注释提取，否则使用地理位置查询
+        解析地区标识：优先从测试结果提取，其次从注释提取，最后使用地理位置查询
 
         Args:
             target: 清理后的目标（IP或域名）
             original: 原始输入字符串
+            result: 测试结果字典（包含地理位置信息）
 
         Returns:
-            地区标识字符串（注释标签 > 地理查询结果 > 目标本身 > "未知"）
+            地区标识字符串（测试结果 > 注释标签 > 地理查询结果 > 目标本身 > "未知"）
         """
-        # 优先使用注释中的地区标识
+        # 优先使用测试结果中的地理位置信息
+        if result and result.get('location', {}).get('success'):
+            location_data = result.get('location', {})
+            # 优先使用 colo（机场代码）
+            location_tag = location_data.get('colo', '')
+            if location_tag and location_tag != 'Unknown':
+                return location_tag
+            # 回退到 country（国家代码）
+            location_tag = location_data.get('country', '')
+            if location_tag and location_tag != 'Unknown':
+                return location_tag
+            # 最后回退到 region（组合信息）
+            location_tag = location_data.get('region', '')
+            if location_tag and location_tag != 'Unknown':
+                return location_tag
+
+        # 其次使用注释中的地区标识
         comment_tag = self._extract_location_tag_from_comment(original)
         if comment_tag:
             return comment_tag
@@ -1313,10 +1720,11 @@ class AdvancedIPTester:
         if not target:
             return "未知"
 
-        # 尝试地理位置查询
-        country_code, _ = self.get_country_from_ip(target)
-        if country_code and country_code not in ("未知", "Unknown"):
-            return country_code
+        # 尝试地理位置查询（仅在启用时）
+        if self.config.get('enable_location_test', True):
+            country_code, _ = self.get_country_from_ip(target)
+            if country_code and country_code not in ("未知", "Unknown"):
+                return country_code
 
         # 如果目标包含字母（域名），返回目标本身作为标识
         if any(c.isalpha() for c in str(target)):
@@ -1324,7 +1732,7 @@ class AdvancedIPTester:
 
         # 否则返回目标本身（IP地址）
         return str(target)
-    
+
     def load_history(self, history_file: str = 'data/output/result_history.json') -> Optional[Dict]:
         """
         加载历史测试结果
@@ -1716,16 +2124,16 @@ class AdvancedIPTester:
             # 创建成功结果的表格
             successful_results = [r for r in sorted_results if r['success']]
             if successful_results:
-                f.write("| 排名 | 目标 | 延迟 | 丢包 | 抖动 | TCP连接 | 综合评分 | 状态 |\n")
-                f.write("|:---:|:---|:---:|:---:|:---:|:---:|:---|:---:|\n")
-                
+                f.write("| 排名 | 目标 | 延迟 | 丢包 | 抖动 | TCP连接 | 下载速度 | 地理位置 | 综合评分 | 状态 |\n")
+                f.write("|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---|:---:|\n")
+
                 rank = 1
                 for result in successful_results:
                     target = result['original']
                     if len(target) > 35:
                         target = target[:32] + "..."
                     target = self._escape_md_cell(target)
-                    
+
                     delay = self._format_number(
                         self._coerce_number(result.get('ping', {}).get('avg_delay')),
                         precision=1,
@@ -1741,7 +2149,7 @@ class AdvancedIPTester:
                         precision=1,
                         suffix="ms"
                     )
-                    
+
                     tcp_time = "N/A"
                     if result.get('tcp', {}).get('success'):
                         tcp_time = self._format_number(
@@ -1749,27 +2157,44 @@ class AdvancedIPTester:
                             precision=1,
                             suffix="ms"
                         )
-                    
+
+                    # 下载速度
+                    download_speed = "N/A"
+                    download_result = result.get('download', {})
+                    if download_result and download_result.get('success'):
+                        speed = download_result.get('speed_mbps', 0)
+                        download_speed = self._format_number(
+                            self._coerce_number(speed),
+                            precision=2,
+                            suffix=" MB/s"
+                        )
+
+                    # 地理位置
+                    location = "Unknown"
+                    location_result = result.get('location', {})
+                    if location_result and location_result.get('success'):
+                        location = location_result.get('region', 'Unknown')
+
                     scores = result.get('scores', {})
                     overall = self._coerce_number(scores.get('overall'))
                     overall_value = overall if overall is not None else 0
-                    
+
                     # 评分条
                     def get_progress_bar(score):
                         filled = int(score / 10)
                         bar = "█" * filled + "░" * (10 - filled)
                         emoji = self._get_score_emoji(score)
                         return f"`{bar}` **{score}** {emoji}"
-                    
+
                     overall_display = get_progress_bar(overall_value)
-                    
+
                     # 前三名高亮
                     rank_str = str(rank)
                     if rank == 1: rank_str = "🥇"
                     elif rank == 2: rank_str = "🥈"
                     elif rank == 3: rank_str = "🥉"
-                    
-                    f.write(f"| {rank_str} | `{target}` | {delay} | {loss} | {jitter} | {tcp_time} | {overall_display} | ✅ |\n")
+
+                    f.write(f"| {rank_str} | `{target}` | {delay} | {loss} | {jitter} | {tcp_time} | {download_speed} | `{location}` | {overall_display} | ✅ |\n")
                     rank += 1
             
             # 详细评分表
@@ -2044,8 +2469,8 @@ class AdvancedIPTester:
                         if port_part.isdigit():
                             port = f":{port_part}"
 
-                # 解析地区标识（优先注释，否则地理查询）
-                location_tag = self._resolve_location_tag(clean_target, original)
+                # 解析地区标识（优先测试结果，其次注释，最后地理查询）
+                location_tag = self._resolve_location_tag(clean_target, original, result)
 
                 # 组合新行: IP:端口#地区标识
                 new_line = f"{clean_target}{port}#{location_tag}\n"
@@ -2067,7 +2492,7 @@ class AdvancedIPTester:
                         port = f":{port_part}"
 
             # 提取地区标识（与保存逻辑一致）
-            location_tag = self._resolve_location_tag(clean_target, original)
+            location_tag = self._resolve_location_tag(clean_target, original, result)
 
             print(f"  {i}. {clean_target}{port}#{location_tag}")
 

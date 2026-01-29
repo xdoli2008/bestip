@@ -106,3 +106,41 @@ http_timeout: 10
 1. 确认 `config.yaml` 在项目根目录
 2. 确认已安装 `pyyaml`
 3. 对照 `config.example.yaml` 检查参数名拼写
+
+## 新增功能配置（v2.1+）
+
+### 下载速度测试
+测试真实下载速度，更准确反映带宽质量：
+```yaml
+enable_download_test: true
+download_test_duration: 10  # 测试时长（秒）
+download_timeout: 15         # 超时时间（秒）
+```
+
+**注意：** 会显著增加测试时间（每个节点约10秒）
+
+### 地理位置检测
+自动检测IP的地理位置（机场代码、国家等）：
+```yaml
+enable_location_test: true
+location_timeout: 5  # 超时时间（秒）
+```
+
+### 改进的排序算法
+按丢包率分组后再排序，避免高丢包低延迟IP排前面：
+```yaml
+sort_by: quality  # quality / overall / delay / loss
+quality_sort_candidates: 10
+```
+
+**排序策略：**
+- `quality`（推荐）：按丢包率分组（0% > <5% > <10% > >=10%），组内按延迟和速度排序
+- `overall`：按综合评分降序
+- `delay`：按延迟升序
+- `loss`：按丢包率升序
+
+### 快速检测改进
+提高快速检测阶段的准确性：
+```yaml
+quick_ping_count: 3  # 从1次增加到3次
+```

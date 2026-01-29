@@ -150,14 +150,14 @@ class ProxyScoreCalculator:
 
         # 下载速度评分（15分）
         if download_result and download_result.get('success'):
-            speed_mbps = download_result.get('speed_mbps', 0)
-            if speed_mbps >= 5:
+            speed_mBps = download_result.get('speed_mBps', 0)
+            if speed_mBps >= 5:
                 score += 15
-            elif speed_mbps >= 2:
+            elif speed_mBps >= 2:
                 score += 10
-            elif speed_mbps >= 1:
+            elif speed_mBps >= 1:
                 score += 6
-            elif speed_mbps >= 0.5:
+            elif speed_mBps >= 0.5:
                 score += 3
             else:
                 score += 1
@@ -410,7 +410,7 @@ if __name__ == '__main__':
         },
         'download': {
             'success': True,
-            'speed_mbps': 8.5
+            'speed_mBps': 8.5
         }
     }
 
