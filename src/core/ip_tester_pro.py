@@ -27,11 +27,13 @@ try:
     from src.analyzers.statistical_analyzer import StatisticalAnalyzer
     from src.analyzers.proxy_score_calculator import ProxyScoreCalculator
     from src.utils.url_fetcher import fetch_targets_from_urls
+    from src.utils.ip_info_client import IPInfoClient
 except ImportError:
     # 如果导入失败，使用默认值（向后兼容）
     HTTP_TEST_URLS = ['https://cp.cloudflare.com/generate_204']
     StatisticalAnalyzer = None
     ProxyScoreCalculator = None
+    IPInfoClient = None
     # URL获取模块向后兼容
     def fetch_targets_from_urls(urls, config=None):
         print("警告: URL获取模块未安装")
@@ -87,6 +89,19 @@ class AdvancedIPTester:
 
         # 输出配置（新增）
         self.max_results = self.config.get('max_results', 30)
+
+        # IP 信息查询客户端（新增）
+        self.ipinfo_client = None
+        if IPInfoClient and self.config.get('enable_ipinfo', False):
+            api_key = self.config.get('ipinfo_api_key', '')
+            if api_key and api_key != 'your_api_key_here':
+                try:
+                    self.ipinfo_client = IPInfoClient(api_key, self.config)
+                    print(f"{self.CLR_G}[OK] IP 信息查询服务已启用{self.CLR_0}")
+                except Exception as e:
+                    print(f"{self.CLR_Y}[WARNING] IP 信息查询服务初始化失败: {e}{self.CLR_0}")
+            else:
+                print(f"{self.CLR_Y}[提示] IP 信息查询服务未配置 API Key{self.CLR_0}")
 
     def _get_score_color(self, score: int) -> str:
         """根据评分获取颜色"""
@@ -745,8 +760,8 @@ class AdvancedIPTester:
         """
         获取IP的地理位置信息
 
-        使用 Cloudflare 的 trace 接口获取 IP 的实际位置信息。
-        默认使用 HTTPS (443端口) + TLS + SNI。
+        优先使用 ipinfo.dkly.net API 获取详细信息，
+        如果 API 不可用则回退到 Cloudflare trace 接口。
 
         Args:
             ip: IP地址
@@ -759,6 +774,13 @@ class AdvancedIPTester:
                 'country': str,           # 国家代码（如US、CN）
                 'ip': str,                # 实际IP地址
                 'region': str,            # 区域信息
+                'city': str,              # 城市（新增）
+                'asn': str,               # ASN（新增）
+                'organization': str,      # 组织/运营商（新增）
+                'proxy_type': str,        # 代理类型（新增）
+                'is_vpn': bool,           # 是否VPN（新增）
+                'is_proxy': bool,         # 是否代理（新增）
+                'is_tor': bool,           # 是否Tor（新增）
                 'error': str              # 错误信息
             }
         """
@@ -768,12 +790,62 @@ class AdvancedIPTester:
             'country': 'Unknown',
             'ip': 'Unknown',
             'region': 'Unknown',
+            'city': 'Unknown',
+            'display_location': 'Unknown',  # 新增：格式化的位置字符串（仅用于展示）
+            'asn': 'Unknown',
+            'organization': 'Unknown',
+            'proxy_type': 'Unknown',
+            'is_vpn': False,
+            'is_proxy': False,
+            'is_tor': False,
             'error': None
         }
 
         clean_ip = self._clean_target(ip)
 
-        # 获取配置的超时时间
+        # 优先使用 IP 信息 API
+        if self.ipinfo_client:
+            try:
+                api_data = self.ipinfo_client.query_ip(clean_ip)
+
+                if api_data:
+                    # 提取地理位置信息
+                    location_info = self.ipinfo_client.extract_location_info(api_data)
+                    result['country'] = location_info.get('country', 'Unknown')
+                    result['region'] = location_info.get('region', 'Unknown')
+                    result['city'] = location_info.get('city', 'Unknown')
+
+                    # 提取网络信息
+                    network_info = self.ipinfo_client.extract_network_info(api_data)
+                    result['asn'] = network_info.get('asn', 'Unknown')
+                    result['organization'] = network_info.get('organization', 'Unknown')
+
+                    # 提取安全信息
+                    security_info = self.ipinfo_client.extract_security_info(api_data)
+                    result['is_vpn'] = security_info.get('is_vpn', False)
+                    result['is_proxy'] = security_info.get('is_proxy', False)
+                    result['is_tor'] = security_info.get('is_tor', False)
+
+                    # 获取代理类型字符串
+                    result['proxy_type'] = self.ipinfo_client.get_proxy_type_string(api_data)
+
+                    # 获取格式化的位置字符串（用于展示）
+                    location_str = self.ipinfo_client.get_location_string(api_data)
+                    if location_str != "未知":
+                        result['display_location'] = location_str
+                    else:
+                        result['display_location'] = result['region']
+
+                    result['ip'] = api_data.get('ip', clean_ip)
+                    result['success'] = True
+
+                    return result
+
+            except Exception as e:
+                # API 失败，记录错误但继续使用备用方法
+                print(f"{self.CLR_Y}[WARNING] IP 信息 API 查询失败: {e}，使用备用方法{self.CLR_0}")
+
+        # 回退到 Cloudflare trace 接口
         location_timeout = self.config.get('location_timeout', 5)
 
         sock = None
@@ -830,15 +902,18 @@ class AdvancedIPTester:
                     elif key == 'ip':
                         result['ip'] = value
 
-            # 构造区域信息
+            # 构造区域信息和展示字符串
             if result['colo'] != 'Unknown' and result['country'] != 'Unknown':
-                result['region'] = f"{result['colo']}/{result['country']}"
+                result['region'] = result['country']  # region 保持为国家代码
+                result['display_location'] = f"{result['colo']}/{result['country']}"  # 展示用
                 result['success'] = True
             elif result['colo'] != 'Unknown':
                 result['region'] = result['colo']
+                result['display_location'] = result['colo']
                 result['success'] = True
             elif result['country'] != 'Unknown':
                 result['region'] = result['country']
+                result['display_location'] = result['country']
                 result['success'] = True
 
         except ssl.SSLError as e:
@@ -1556,11 +1631,11 @@ class AdvancedIPTester:
                     if download_result and download_result.get('success'):
                         download_speed = f"{download_result.get('speed_mbps', 0):.2f} Mbps"
 
-                    # 地理位置
+                    # 地理位置（优先使用 display_location）
                     location = "Unknown"
                     location_result = result.get('location', {})
                     if location_result and location_result.get('success'):
-                        location = location_result.get('region', 'Unknown')[:15]
+                        location = location_result.get('display_location', location_result.get('region', 'Unknown'))[:15]
 
                     scores = result['scores']
                     overall = str(scores.get('overall', 0))
@@ -2169,11 +2244,11 @@ class AdvancedIPTester:
                             suffix=" MB/s"
                         )
 
-                    # 地理位置
+                    # 地理位置（优先使用 display_location）
                     location = "Unknown"
                     location_result = result.get('location', {})
                     if location_result and location_result.get('success'):
-                        location = location_result.get('region', 'Unknown')
+                        location = location_result.get('display_location', location_result.get('region', 'Unknown'))
 
                     scores = result.get('scores', {})
                     overall = self._coerce_number(scores.get('overall'))
@@ -2223,6 +2298,83 @@ class AdvancedIPTester:
 
                     f.write(f"| {rank} | `{target}` | {fmt_score(scores.get('overall', 0))} | {fmt_score(scores.get('streaming', 0))} | {fmt_score(scores.get('gaming', 0))} | {fmt_score(scores.get('rtc', 0))} |\n")
                     rank += 1
+
+            # IP 详细信息表（如果启用了 IP 信息查询）
+            if self.ipinfo_client and successful_results:
+                # 检查是否有任何结果包含详细的 IP 信息
+                has_detailed_info = any(
+                    r.get('location', {}).get('asn') not in ['Unknown', None] or
+                    r.get('location', {}).get('organization') not in ['Unknown', None]
+                    for r in successful_results
+                )
+
+                if has_detailed_info:
+                    f.write("\n## 🌐 IP 详细信息\n\n")
+                    f.write("| 排名 | 目标 | 地理位置 | ASN | 运营商/组织 | 代理类型 |\n")
+                    f.write("|:---:|:---|:---|:---|:---|:---:|\n")
+
+                    rank = 1
+                    for result in successful_results:
+                        target = result['original']
+                        if len(target) > 25:
+                            target = target[:22] + "..."
+                        target = self._escape_md_cell(target)
+
+                        location_result = result.get('location', {})
+                        if location_result and location_result.get('success'):
+                            # 地理位置（使用 display_location 或构造）
+                            display_loc = location_result.get('display_location', 'Unknown')
+                            if display_loc == 'Unknown':
+                                region = location_result.get('region', 'Unknown')
+                                city = location_result.get('city', '')
+                                if city and city != 'Unknown' and city not in region:
+                                    display_loc = f"{region}/{city}"
+                                else:
+                                    display_loc = region
+
+                            # 转义地理位置字符串
+                            location_str = self._escape_md_cell(display_loc)
+
+                            # ASN
+                            asn = location_result.get('asn', 'Unknown')
+                            if asn and asn != 'Unknown':
+                                asn_display = f"`{self._escape_md_cell(asn)}`"
+                            else:
+                                asn_display = "N/A"
+
+                            # 运营商/组织
+                            org = location_result.get('organization', 'Unknown')
+                            if org and org != 'Unknown':
+                                if len(org) > 30:
+                                    org = org[:27] + "..."
+                                org_display = self._escape_md_cell(org)
+                            else:
+                                org_display = "N/A"
+
+                            # 代理类型
+                            proxy_type = location_result.get('proxy_type', 'Unknown')
+                            if proxy_type and proxy_type != 'Unknown':
+                                # 转义代理类型
+                                proxy_type_escaped = self._escape_md_cell(proxy_type)
+                                # 添加图标
+                                if 'VPN' in proxy_type:
+                                    proxy_display = f"🔒 {proxy_type_escaped}"
+                                elif 'Proxy' in proxy_type:
+                                    proxy_display = f"🌐 {proxy_type_escaped}"
+                                elif 'Tor' in proxy_type:
+                                    proxy_display = f"🧅 {proxy_type_escaped}"
+                                elif proxy_type == '直连':
+                                    proxy_display = "✅ 直连"
+                                else:
+                                    proxy_display = proxy_type_escaped
+                            else:
+                                proxy_display = "N/A"
+
+                            f.write(f"| {rank} | `{target}` | {location_str} | {asn_display} | {org_display} | {proxy_display} |\n")
+                        else:
+                            f.write(f"| {rank} | `{target}` | N/A | N/A | N/A | N/A |\n")
+
+                        rank += 1
 
             # 失败结果部分
             failed_results = [r for r in sorted_results if not r['success']]

@@ -90,6 +90,16 @@ DEFAULT_CONFIG = {
 
     # 输出配置（新增）
     'max_results': 30,                    # 保存的最大结果数量（默认30）
+
+    # IP 信息查询配置（新增）
+    'enable_ipinfo': True,                # 是否启用 IP 信息查询（默认启用）
+    'ipinfo_api_key': '',                 # IP 信息 API 密钥（必填）
+    'ipinfo_rate_limit': 60,              # API 速率限制（请求/分钟）
+    'ipinfo_timeout': 10,                 # API 请求超时（秒）
+    'ipinfo_max_retries': 3,              # API 请求最大重试次数
+    'ipinfo_retry_delay': 1,              # API 请求重试延迟（秒）
+    'ipinfo_enable_cache': True,          # 是否启用缓存
+    'ipinfo_cache_ttl': 3600,             # 缓存有效期（秒，默认1小时）
 }
 
 
