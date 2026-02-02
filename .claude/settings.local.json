@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(python:*)",
+      "WebFetch(domain:ipinfo.dkly.net)",
+      "Bash(git add src/utils/ip_info_client.py docs/IPINFO_API.md tests/test_ip_info_client.py config.example.yaml src/config/config.py src/core/ip_tester_pro.py)",
+      "Bash(git add \"src/utils/ip_info_client.py\" \"docs/IPINFO_API.md\" \"config.example.yaml\" \"src/config/config.py\" \"src/core/ip_tester_pro.py\" \"config.yaml\")",
+      "Bash(git add \"src/utils/ip_info_client.py\" \"docs/IPINFO_API.md\" \"config.example.yaml\" \"src/config/config.py\" \"src/core/ip_tester_pro.py\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: 集成 ipinfo.dkly.net API 获取详细 IP 信息\n\n新增功能：\n- 新增 IP 信息查询客户端 \\(src/utils/ip_info_client.py\\)\n  * 支持地理位置、ASN、运营商、代理类型等详细信息查询\n  * 智能速率限制保护 \\(60 请求/分钟\\)\n  * 缓存机制优化 \\(默认 1 小时\\)\n  * 自动重试和错误处理\n- 增强地理位置检测功能\n  * 优先使用 ipinfo.dkly.net API\n  * 失败时自动回退到 Cloudflare trace\n- Markdown 报告新增 IP 详细信息表格\n  * 显示 ASN、运营商、代理类型等信息\n  * 支持 VPN/Proxy/Tor 识别\n\n代码质量改进：\n- 修复字段语义一致性问题\n  * region 保持原始值，新增 display_location 用于展示\n  * 避免字段覆盖导致的数据不一致\n- 完善 Markdown 表格转义\n  * 所有字段使用 _escape_md_cell 防止表格破坏\n- 优化结果字典初始化\n  * 明确初始化 success=False\n\n配置更新：\n- config.example.yaml: 新增 IP 信息 API 配置项\n- src/config/config.py: 添加 ipinfo 相关配置定义\n- docs/IPINFO_API.md: 完整的使用说明文档\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}

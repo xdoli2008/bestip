@@ -15,7 +15,9 @@
 - `src/config/config.py`: Configuration management.
 - `src/analyzers/`: Contains `proxy_score_calculator.py` and `statistical_analyzer.py` for performance evaluation.
 - `src/utils/url_fetcher.py`: Utility for fetching IP lists from remote URLs.
+- `src/utils/ip_info_client.py`: Client for the ipinfo.dkly.net API (New).
 - `data/`: Directory for input lists (`testip.txt`, `custom.txt`) and output results (`best.txt`, `ip.txt`, `result_pro.md`, `result_history.json`).
+- `docs/IPINFO_API.md`: Detailed documentation for IP information integration (New).
 
 ## Building and Running
 

@@ -2,7 +2,14 @@
 
 这是一个用于批量测试IP地址和域名质量的Python工具，**特别针对代理服务器和VPN节点进行了优化**。它支持多种输入方式（文件/URL/自定义列表），通过两阶段测试流程（快速筛选 + 深度测试）快速识别优质节点，然后按质量排序输出详细报告。
 
-## ✨ 新版本亮点（v2.1）
+## ✨ 新版本亮点（v3.0）
+
+### 🌍 IP 详细信息集成（NEW）
+- **集成 ipinfo.dkly.net API**：获取更丰富的 IP 信息，包括 ASN、运营商、代理类型等。
+- **智能回退机制**：API 不可用时自动回退到 Cloudflare trace 接口。
+- **详细报告增强**：Markdown 报告新增 IP 详细信息表，支持地理位置精确定位。
+- **安全性检测**：自动识别 VPN、Proxy、Tor 等节点类型。
+- **详细文档**：查看 [IPINFO_API.md](docs/IPINFO_API.md) 了解更多。
 
 ### 🚀 速度提升 90%
 - **两阶段测试策略**：快速筛选（1-2秒/节点） + 深度测试
@@ -81,6 +88,7 @@
 - `config.py` - 配置管理模块
 - `statistical_analyzer.py` - 统计分析模块
 - `proxy_score_calculator.py` - 代理评分计算器
+- `src/utils/ip_info_client.py` - IP 信息 API 客户端 (NEW)
 
 ### 输入/输出文件
 - `data/input/testip.txt` - 主输入文件，包含要测试的域名和IP列表
@@ -89,6 +97,7 @@
 - `data/output/result_pro.txt` - 详细测试结果（文本格式）
 - `data/output/result_pro.md` - 详细测试结果（Markdown格式，推荐查看）
 - `data/output/result_history.json` - 历史结果（用于Markdown报告变动对比）
+- `docs/IPINFO_API.md` - IP 信息 API 集成说明文档 (NEW)
 
 ### 批处理脚本
 - `run_pro.bat` - 运行专业版测试（推荐）

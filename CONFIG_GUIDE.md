@@ -139,8 +139,18 @@ quality_sort_candidates: 10
 - `delay`：按延迟升序
 - `loss`：按丢包率升序
 
-### 快速检测改进
+### 改进的快速检测改进
 提高快速检测阶段的准确性：
 ```yaml
 quick_ping_count: 3  # 从1次增加到3次
 ```
+
+### IP 信息查询配置 (v3.0+)
+集成 [ipinfo.dkly.net](https://ipinfo.dkly.net) API 以获取更详细的节点信息：
+```yaml
+enable_ipinfo: true             # 是否启用
+ipinfo_api_key: "YOUR_KEY"      # 你的 API Key
+ipinfo_enable_cache: true       # 启用缓存以节省配额
+ipinfo_cache_ttl: 3600          # 缓存时长（秒）
+```
+详情请参阅 [docs/IPINFO_API.md](docs/IPINFO_API.md)。
